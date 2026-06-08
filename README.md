@@ -9,6 +9,13 @@ Reads native-text PDFs via **pypdfium2** (Chrome's PDFium engine) and emits stru
 pip install -r requirements.txt
 ```
 
+For development (linting, tests, git hooks):
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pre-commit install
+```
+
 ## Usage
 
 ```bash

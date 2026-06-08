@@ -1,0 +1,5 @@
+# Development dependencies (linting, tests, git hooks).
+# Install:  uv pip install -r requirements.txt -r requirements-dev.txt
+pytest>=9.0
+ruff>=0.15
+pre-commit>=4.6
