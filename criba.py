@@ -132,32 +132,33 @@ def _extract_text_spans(page: pdfium.PdfPage, page_height: float) -> list[dict]:
     tp = page.get_textpage()
     raw_spans: list[dict] = []
 
-    for obj in page.get_objects(filter=[_PAGEOBJ_TEXT]):
-        text_obj = pdfium.PdfTextObj(obj.raw, textpage=tp)
+    try:
+        for obj in page.get_objects(filter=[_PAGEOBJ_TEXT]):
+            text_obj = pdfium.PdfTextObj(obj.raw, textpage=tp)
 
-        text = text_obj.extract()
-        if not text:
-            continue
+            text = text_obj.extract()
+            if not text:
+                continue
 
-        font = text_obj.get_font()
-        font_name = _strip_subset_prefix(
-            font.get_base_name() or font.get_family_name() or "unknown"
-        )
-        font_size = round(text_obj.get_font_size(), 2)
-        font_weight = font.get_weight()
-        color = _fill_color(obj.raw)
+            font = text_obj.get_font()
+            font_name = _strip_subset_prefix(
+                font.get_base_name() or font.get_family_name() or "unknown"
+            )
+            font_size = round(text_obj.get_font_size(), 2)
+            font_weight = font.get_weight()
+            color = _fill_color(obj.raw)
 
-        left, bottom, right, top = obj.get_bounds()
-        bbox = _normalize_bbox(left, bottom, right, top, page_height)
+            left, bottom, right, top = obj.get_bounds()
+            bbox = _normalize_bbox(left, bottom, right, top, page_height)
 
-        raw_spans.append({
-            "text": text,
-            "bbox": bbox,
-            "font": {"name": font_name, "size": font_size, "weight": font_weight},
-            "color": color,
-        })
-
-    tp.close()
+            raw_spans.append({
+                "text": text,
+                "bbox": bbox,
+                "font": {"name": font_name, "size": font_size, "weight": font_weight},
+                "color": color,
+            })
+    finally:
+        tp.close()
 
     if not raw_spans:
         return []
@@ -189,9 +190,11 @@ def _extract_text_spans(page: pdfium.PdfPage, page_height: float) -> list[dict]:
 def _extract_raw_text(page: pdfium.PdfPage) -> str:
     """Full page text in PDFium's built-in reading order."""
     tp = page.get_textpage()
-    n = tp.count_chars()
-    text = tp.get_text_range(0, n) if n > 0 else ""
-    tp.close()
+    try:
+        n = tp.count_chars()
+        text = tp.get_text_range(0, n) if n > 0 else ""
+    finally:
+        tp.close()
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
@@ -268,37 +271,40 @@ def extract_pdf(pdf_path: str | Path, output_dir: str | Path = "output") -> dict
 
     doc = pdfium.PdfDocument(str(pdf_path))
 
-    result: dict = {
-        "source_file": pdf_path.name,
-        "metadata": _extract_metadata(doc),
-        "pages": [],
-    }
-
-    for i in range(len(doc)):
-        page = doc.get_page(i)
-        w, h = page.get_width(), page.get_height()
-
-        raw_text = _extract_raw_text(page)
-        spans = _extract_text_spans(page, h)
-        images = _extract_images(page, i, h, images_dir)
-
-        page_data: dict = {
-            "page_number": i + 1,
-            "width": round(w, 2),
-            "height": round(h, 2),
-            "raw_text": raw_text,
-            "text_spans": spans,
-            "images": images,
+    try:
+        result: dict = {
+            "source_file": pdf_path.name,
+            "metadata": _extract_metadata(doc),
+            "pages": [],
         }
 
-        # Heuristic: rendered page but zero text → probably scanned
-        if not raw_text.strip() and not spans:
-            page_data["warning"] = "no_text_layer"
+        for i in range(len(doc)):
+            page = doc.get_page(i)
+            try:
+                w, h = page.get_width(), page.get_height()
 
-        result["pages"].append(page_data)
-        page.close()
+                raw_text = _extract_raw_text(page)
+                spans = _extract_text_spans(page, h)
+                images = _extract_images(page, i, h, images_dir)
 
-    doc.close()
+                page_data: dict = {
+                    "page_number": i + 1,
+                    "width": round(w, 2),
+                    "height": round(h, 2),
+                    "raw_text": raw_text,
+                    "text_spans": spans,
+                    "images": images,
+                }
+
+                # Heuristic: rendered page but zero text → probably scanned
+                if not raw_text.strip() and not spans:
+                    page_data["warning"] = "no_text_layer"
+
+                result["pages"].append(page_data)
+            finally:
+                page.close()
+    finally:
+        doc.close()
 
     # Persist JSON
     json_path = out / f"{stem}.json"

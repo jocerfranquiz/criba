@@ -2,6 +2,7 @@
 
 import pytest
 
+import criba
 from criba import (
     _bbox_union,
     _normalize_bbox,
@@ -53,3 +54,46 @@ def test_bbox_union_covers_both():
 def test_extract_pdf_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         extract_pdf(tmp_path / "does_not_exist.pdf", output_dir=tmp_path / "out")
+
+
+def test_extract_pdf_closes_handles_on_page_error(tmp_path, monkeypatch):
+    """A failure mid-page must still close the page and document handles."""
+
+    closed = {"page": False, "doc": False}
+
+    class FakePage:
+        def get_width(self):
+            return 612.0
+
+        def get_height(self):
+            return 792.0
+
+        def close(self):
+            closed["page"] = True
+
+    class FakeDoc:
+        def __len__(self):
+            return 1
+
+        def get_page(self, i):
+            return FakePage()
+
+        def close(self):
+            closed["doc"] = True
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")  # presence-only; never really parsed
+
+    monkeypatch.setattr(criba.pdfium, "PdfDocument", lambda *a, **k: FakeDoc())
+    monkeypatch.setattr(criba, "_extract_metadata", lambda doc: {})
+    monkeypatch.setattr(
+        criba,
+        "_extract_raw_text",
+        lambda page: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        extract_pdf(pdf, output_dir=tmp_path / "out")
+
+    assert closed["page"], "page handle was not closed on error"
+    assert closed["doc"], "document handle was not closed on error"
