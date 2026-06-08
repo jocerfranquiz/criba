@@ -1,0 +1,22 @@
+# Pre-commit hooks for criba.
+# Setup:  pre-commit install
+# Run on all files:  pre-commit run --all-files
+repos:
+  # Ruff: lint + format (pinned to the version installed in .venv)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.16
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # Pytest: run the test suite before committing (uses the local env)
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: pytest
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
