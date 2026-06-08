@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-_PAGEOBJ_TEXT = pdfium_c.FPDF_PAGEOBJ_TEXT    # 1
+_PAGEOBJ_TEXT = pdfium_c.FPDF_PAGEOBJ_TEXT  # 1
 _PAGEOBJ_IMAGE = pdfium_c.FPDF_PAGEOBJ_IMAGE  # 3
 
 # Same-line tolerance in PDF points when coalescing spans.
@@ -49,6 +49,7 @@ _SPACE_GAP_RATIO = 0.25
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def _strip_subset_prefix(name: str) -> str:
     """``ABCDEF+Arial`` → ``Arial``.  Leaves other names unchanged."""
@@ -65,15 +66,19 @@ def _fill_color(raw_handle) -> dict:
     a = ctypes.c_uint(0)
     ok = pdfium_c.FPDFPageObj_GetFillColor(
         raw_handle,
-        ctypes.byref(r), ctypes.byref(g), ctypes.byref(b), ctypes.byref(a),
+        ctypes.byref(r),
+        ctypes.byref(g),
+        ctypes.byref(b),
+        ctypes.byref(a),
     )
     if ok:
         return {"r": r.value, "g": g.value, "b": b.value, "a": a.value}
     return {"r": 0, "g": 0, "b": 0, "a": 255}
 
 
-def _normalize_bbox(left: float, bottom: float, right: float, top: float,
-                    page_height: float) -> dict:
+def _normalize_bbox(
+    left: float, bottom: float, right: float, top: float, page_height: float
+) -> dict:
     """PDF coords (origin bottom-left) → top-left origin ``{x, y, w, h}``."""
     return {
         "x": round(left, 2),
@@ -88,18 +93,31 @@ def _bbox_union(a: dict, b: dict) -> dict:
     y0 = min(a["y"], b["y"])
     x1 = max(a["x"] + a["w"], b["x"] + b["w"])
     y1 = max(a["y"] + a["h"], b["y"] + b["h"])
-    return {"x": round(x0, 2), "y": round(y0, 2),
-            "w": round(x1 - x0, 2), "h": round(y1 - y0, 2)}
+    return {
+        "x": round(x0, 2),
+        "y": round(y0, 2),
+        "w": round(x1 - x0, 2),
+        "h": round(y1 - y0, 2),
+    }
 
 
 # ── Metadata ─────────────────────────────────────────────────────────────────
+
 
 def _extract_metadata(doc: pdfium.PdfDocument) -> dict:
     meta: dict = {}
     try:
         raw = doc.get_metadata_dict()
-        for key in ("Title", "Author", "Subject", "Creator", "Producer",
-                     "CreationDate", "ModDate", "Keywords"):
+        for key in (
+            "Title",
+            "Author",
+            "Subject",
+            "Creator",
+            "Producer",
+            "CreationDate",
+            "ModDate",
+            "Keywords",
+        ):
             v = raw.get(key, "")
             if v:
                 meta[key.lower()] = v
@@ -124,6 +142,7 @@ def _extract_metadata(doc: pdfium.PdfDocument) -> dict:
 
 
 # ── Text spans ───────────────────────────────────────────────────────────────
+
 
 def _extract_text_spans(page: pdfium.PdfPage, page_height: float) -> list[dict]:
     """
@@ -152,12 +171,18 @@ def _extract_text_spans(page: pdfium.PdfPage, page_height: float) -> list[dict]:
             left, bottom, right, top = obj.get_bounds()
             bbox = _normalize_bbox(left, bottom, right, top, page_height)
 
-            raw_spans.append({
-                "text": text,
-                "bbox": bbox,
-                "font": {"name": font_name, "size": font_size, "weight": font_weight},
-                "color": color,
-            })
+            raw_spans.append(
+                {
+                    "text": text,
+                    "bbox": bbox,
+                    "font": {
+                        "name": font_name,
+                        "size": font_size,
+                        "weight": font_weight,
+                    },
+                    "color": color,
+                }
+            )
     finally:
         tp.close()
 
@@ -172,7 +197,7 @@ def _extract_text_spans(page: pdfium.PdfPage, page_height: float) -> list[dict]:
 
     for span in raw_spans[1:]:
         prev = merged[-1]
-        same_style = (prev["font"] == span["font"] and prev["color"] == span["color"])
+        same_style = prev["font"] == span["font"] and prev["color"] == span["color"]
         same_line = abs(prev["bbox"]["y"] - span["bbox"]["y"]) < _LINE_TOL_PT
 
         if same_style and same_line:
@@ -188,6 +213,7 @@ def _extract_text_spans(page: pdfium.PdfPage, page_height: float) -> list[dict]:
 
 # ── Raw text ─────────────────────────────────────────────────────────────────
 
+
 def _extract_raw_text(page: pdfium.PdfPage) -> str:
     """Full page text in PDFium's built-in reading order."""
     tp = page.get_textpage()
@@ -201,8 +227,10 @@ def _extract_raw_text(page: pdfium.PdfPage) -> str:
 
 # ── Images ───────────────────────────────────────────────────────────────────
 
-def _extract_images(page: pdfium.PdfPage, page_idx: int,
-                    page_height: float, images_dir: Path) -> list[dict]:
+
+def _extract_images(
+    page: pdfium.PdfPage, page_idx: int, page_height: float, images_dir: Path
+) -> list[dict]:
     results: list[dict] = []
 
     for obj in page.get_objects(filter=[_PAGEOBJ_IMAGE]):
@@ -228,7 +256,9 @@ def _extract_images(page: pdfium.PdfPage, page_idx: int,
         try:
             img.extract(str(dest_prefix), fb_format="png")
         except Exception as exc:
-            logger.warning("Image extraction failed p%d fig%d: %s", page_idx + 1, fig_num, exc)
+            logger.warning(
+                "Image extraction failed p%d fig%d: %s", page_idx + 1, fig_num, exc
+            )
             continue
 
         # Discover the file that was actually written
@@ -243,17 +273,20 @@ def _extract_images(page: pdfium.PdfPage, page_idx: int,
             logger.warning("No output file found for p%d fig%d", page_idx + 1, fig_num)
             continue
 
-        results.append({
-            "index": fig_num,
-            "bbox": bbox,
-            "size_px": {"width": w_px, "height": h_px},
-            "file": str(written.relative_to(images_dir.parent)),
-        })
+        results.append(
+            {
+                "index": fig_num,
+                "bbox": bbox,
+                "size_px": {"width": w_px, "height": h_px},
+                "file": str(written.relative_to(images_dir.parent)),
+            }
+        )
 
     return results
 
 
 # ── Orchestrator ─────────────────────────────────────────────────────────────
+
 
 def extract_pdf(pdf_path: str | Path, output_dir: str | Path = "output") -> dict:
     """
@@ -323,10 +356,13 @@ def extract_pdf(pdf_path: str | Path, output_dir: str | Path = "output") -> dict
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Extract raw data from a PDF into JSON.")
     ap.add_argument("pdf", help="Input PDF path")
-    ap.add_argument("-o", "--output", default="output", help="Output directory (default: ./output)")
+    ap.add_argument(
+        "-o", "--output", default="output", help="Output directory (default: ./output)"
+    )
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
