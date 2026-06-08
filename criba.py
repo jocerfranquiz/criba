@@ -203,10 +203,11 @@ def _extract_raw_text(page: pdfium.PdfPage) -> str:
 def _extract_images(page: pdfium.PdfPage, page_idx: int,
                     page_height: float, images_dir: Path) -> list[dict]:
     results: list[dict] = []
-    fig_num = 0
 
     for obj in page.get_objects(filter=[_PAGEOBJ_IMAGE]):
-        fig_num += 1
+        # Allocate the figure number from successful writes only, so a failed
+        # extraction doesn't leave a gap (next success reuses this number).
+        fig_num = len(results) + 1
         img = pdfium.PdfImage(obj.raw, page=page)
 
         # Bounding box

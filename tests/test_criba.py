@@ -1,10 +1,13 @@
 """Starter tests for criba's pure helpers and basic error handling."""
 
+from pathlib import Path
+
 import pytest
 
 import criba
 from criba import (
     _bbox_union,
+    _extract_images,
     _normalize_bbox,
     _strip_subset_prefix,
     extract_pdf,
@@ -97,3 +100,48 @@ def test_extract_pdf_closes_handles_on_page_error(tmp_path, monkeypatch):
 
     assert closed["page"], "page handle was not closed on error"
     assert closed["doc"], "document handle was not closed on error"
+
+
+# ── _extract_images ───────────────────────────────────────────────────────────
+
+
+def test_extract_images_numbering_has_no_gap_on_failure(tmp_path, monkeypatch):
+    """If the first image fails to extract, the next success is fig_001, not fig_002."""
+
+    images_dir = tmp_path / "imgs"
+    images_dir.mkdir()
+
+    class FakeObj:
+        raw = object()
+
+        def get_bounds(self):
+            return (0.0, 0.0, 10.0, 10.0)
+
+    class FakePage:
+        def get_objects(self, filter):  # noqa: A002 - matches pdfium signature
+            return [FakeObj(), FakeObj()]
+
+    calls = {"n": 0}
+
+    class FakeImage:
+        def __init__(self, raw, page=None):
+            pass
+
+        def get_px_size(self):
+            return (4, 4)
+
+        def extract(self, prefix, fb_format="png"):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("first image fails")
+            Path(prefix + ".png").write_bytes(b"x")  # mimic pdfium writing the file
+
+    monkeypatch.setattr(criba.pdfium, "PdfImage", FakeImage)
+
+    results = _extract_images(
+        FakePage(), page_idx=0, page_height=100.0, images_dir=images_dir
+    )
+
+    assert len(results) == 1
+    assert results[0]["index"] == 1
+    assert results[0]["file"].endswith("page_001_fig_001.png")
