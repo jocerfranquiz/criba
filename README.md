@@ -19,8 +19,11 @@ pre-commit install
 ## Usage
 
 ```bash
-python criba.py document.pdf [-o output_dir]
+python criba.py document.pdf [-o output_dir] [-p PASSWORD]
 ```
+
+Use `-p/--password` for encrypted PDFs. Without it, an encrypted document
+exits with a clear `error: ... is encrypted` message rather than a raw traceback.
 
 ### Output
 

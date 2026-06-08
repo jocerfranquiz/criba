@@ -36,10 +36,18 @@ import pypdfium2.raw as pdfium_c
 
 logger = logging.getLogger(__name__)
 
+
+class EncryptedPDFError(Exception):
+    """Raised when a PDF is encrypted and no/incorrect password was supplied."""
+
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 _PAGEOBJ_TEXT = pdfium_c.FPDF_PAGEOBJ_TEXT  # 1
 _PAGEOBJ_IMAGE = pdfium_c.FPDF_PAGEOBJ_IMAGE  # 3
+
+# PDFium error code for a missing/incorrect password on an encrypted document.
+_FPDF_ERR_PASSWORD = pdfium_c.FPDF_ERR_PASSWORD  # 4
 
 # Same-line tolerance in PDF points when coalescing spans.
 _LINE_TOL_PT = 2.0
@@ -288,11 +296,19 @@ def _extract_images(
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
 
-def extract_pdf(pdf_path: str | Path, output_dir: str | Path = "output") -> dict:
+def extract_pdf(
+    pdf_path: str | Path, output_dir: str | Path = "output", password: str | None = None
+) -> dict:
     """
     Extract all raw data from *pdf_path* and write the result to *output_dir*.
 
+    Pass *password* to open an encrypted/password-protected PDF.
+
     Returns the full result dict (same object serialised as JSON).
+
+    Raises:
+        FileNotFoundError: if *pdf_path* does not exist.
+        EncryptedPDFError: if the PDF is encrypted and *password* is missing/wrong.
     """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
@@ -304,7 +320,18 @@ def extract_pdf(pdf_path: str | Path, output_dir: str | Path = "output") -> dict
     images_dir = out / f"{stem}_images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    doc = pdfium.PdfDocument(str(pdf_path))
+    try:
+        doc = pdfium.PdfDocument(str(pdf_path), password=password)
+    except pdfium.PdfiumError as exc:
+        if getattr(exc, "err_code", None) == _FPDF_ERR_PASSWORD:
+            hint = (
+                "incorrect password"
+                if password is not None
+                else "encrypted; supply a password via the 'password' argument "
+                "(or --password on the CLI)"
+            )
+            raise EncryptedPDFError(f"{pdf_path.name} is {hint}.") from exc
+        raise
 
     try:
         result: dict = {
@@ -363,6 +390,9 @@ def main() -> None:
     ap.add_argument(
         "-o", "--output", default="output", help="Output directory (default: ./output)"
     )
+    ap.add_argument(
+        "-p", "--password", default=None, help="Password for an encrypted PDF"
+    )
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -371,7 +401,10 @@ def main() -> None:
         format="%(levelname)s: %(message)s",
     )
 
-    result = extract_pdf(args.pdf, args.output)
+    try:
+        result = extract_pdf(args.pdf, args.output, password=args.password)
+    except EncryptedPDFError as exc:
+        raise SystemExit(f"error: {exc}")
 
     pages = len(result["pages"])
     spans = sum(len(p["text_spans"]) for p in result["pages"])

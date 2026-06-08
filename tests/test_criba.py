@@ -6,6 +6,7 @@ import pytest
 
 import criba
 from criba import (
+    EncryptedPDFError,
     _bbox_union,
     _extract_images,
     _normalize_bbox,
@@ -57,6 +58,44 @@ def test_bbox_union_covers_both():
 def test_extract_pdf_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         extract_pdf(tmp_path / "does_not_exist.pdf", output_dir=tmp_path / "out")
+
+
+def _password_error():
+    return criba.pdfium.PdfiumError("bad password", err_code=criba._FPDF_ERR_PASSWORD)
+
+
+def test_extract_pdf_encrypted_raises_friendly_error(tmp_path, monkeypatch):
+    """A password-coded PdfiumError becomes an EncryptedPDFError with guidance."""
+
+    pdf = tmp_path / "secret.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    def boom(*a, **k):
+        raise _password_error()
+
+    monkeypatch.setattr(criba.pdfium, "PdfDocument", boom)
+
+    with pytest.raises(EncryptedPDFError, match="supply a password"):
+        extract_pdf(pdf, output_dir=tmp_path / "out")
+
+    # With a (wrong) password supplied, the message reflects that instead.
+    with pytest.raises(EncryptedPDFError, match="incorrect password"):
+        extract_pdf(pdf, output_dir=tmp_path / "out", password="nope")
+
+
+def test_extract_pdf_non_password_pdfium_error_propagates(tmp_path, monkeypatch):
+    """Non-password PdfiumErrors are not masked as EncryptedPDFError."""
+
+    pdf = tmp_path / "broken.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    def boom(*a, **k):
+        raise criba.pdfium.PdfiumError("corrupt", err_code=1)
+
+    monkeypatch.setattr(criba.pdfium, "PdfDocument", boom)
+
+    with pytest.raises(criba.pdfium.PdfiumError):
+        extract_pdf(pdf, output_dir=tmp_path / "out")
 
 
 def test_extract_pdf_closes_handles_on_page_error(tmp_path, monkeypatch):
