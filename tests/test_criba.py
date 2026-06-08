@@ -145,3 +145,57 @@ def test_extract_images_numbering_has_no_gap_on_failure(tmp_path, monkeypatch):
     assert len(results) == 1
     assert results[0]["index"] == 1
     assert results[0]["file"].endswith("page_001_fig_001.png")
+
+
+# ── _extract_metadata ─────────────────────────────────────────────────────────
+
+
+def test_extract_metadata_logs_pdfium_errors_at_debug(caplog):
+    """PdfiumError during metadata extraction is logged at debug, not swallowed."""
+
+    class FakeDoc:
+        def __len__(self):
+            return 3
+
+        def get_metadata_dict(self):
+            raise criba.pdfium.PdfiumError("no metadata")
+
+        def get_version(self):
+            raise criba.pdfium.PdfiumError("no version")
+
+        def is_tagged(self):
+            raise criba.pdfium.PdfiumError("no tag info")
+
+    with caplog.at_level("DEBUG", logger="criba"):
+        meta = criba._extract_metadata(FakeDoc())
+
+    # Degrades gracefully: page_count still set, optional fields skipped.
+    assert meta == {"page_count": 3}
+    # But each failure left a debug breadcrumb.
+    assert len(caplog.records) == 3
+    assert all(r.levelname == "DEBUG" for r in caplog.records)
+
+
+def test_extract_metadata_omits_version_when_none(caplog):
+    """get_version() returning None yields no pdf_version key and no error log."""
+
+    class FakeDoc:
+        def __len__(self):
+            return 1
+
+        def get_metadata_dict(self):
+            return {}
+
+        def get_version(self):
+            return None
+
+        def is_tagged(self):
+            return False
+
+    with caplog.at_level("DEBUG", logger="criba"):
+        meta = criba._extract_metadata(FakeDoc())
+
+    assert "pdf_version" not in meta
+    assert meta["page_count"] == 1
+    assert meta["tagged"] is False
+    assert caplog.records == []

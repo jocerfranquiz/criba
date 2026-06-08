@@ -103,21 +103,22 @@ def _extract_metadata(doc: pdfium.PdfDocument) -> dict:
             v = raw.get(key, "")
             if v:
                 meta[key.lower()] = v
-    except Exception:
-        pass
+    except pdfium.PdfiumError:
+        logger.debug("Metadata dict extraction failed", exc_info=True)
 
     meta["page_count"] = len(doc)
 
     try:
-        v = doc.get_version()
-        meta["pdf_version"] = f"{v // 10}.{v % 10}"  # 14 → "1.4", 20 → "2.0"
-    except Exception:
-        pass
+        v = doc.get_version()  # None if new doc or version undeterminable
+        if v is not None:
+            meta["pdf_version"] = f"{v // 10}.{v % 10}"  # 14 → "1.4", 20 → "2.0"
+    except pdfium.PdfiumError:
+        logger.debug("PDF version extraction failed", exc_info=True)
 
     try:
         meta["tagged"] = doc.is_tagged()
-    except Exception:
-        pass
+    except pdfium.PdfiumError:
+        logger.debug("Tagged-PDF check failed", exc_info=True)
 
     return meta
 
