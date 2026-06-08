@@ -51,8 +51,10 @@ _PAGEOBJ_IMAGE = pdfium_c.FPDF_PAGEOBJ_IMAGE  # 3
 # PDFium error code for a missing/incorrect password on an encrypted document.
 _FPDF_ERR_PASSWORD = pdfium_c.FPDF_ERR_PASSWORD  # 4
 
-# Same-line tolerance in PDF points when coalescing spans.
-_LINE_TOL_PT = 2.0
+# Two spans share a line when their vertical extents overlap by at least this
+# fraction of the shorter span's height.  Using overlap (not top-y proximity)
+# keeps baseline-aligned text of different font sizes on the same line.
+_LINE_OVERLAP_RATIO = 0.5
 
 # Minimum gap (as fraction of font size) to insert a space between merged spans.
 _SPACE_GAP_RATIO = 0.25
@@ -231,27 +233,57 @@ def _extract_text_spans(page: pdfium.PdfPage, page_height: float) -> list[dict]:
     finally:
         tp.close()
 
+    return _coalesce_lines(raw_spans)
+
+
+def _coalesce_lines(raw_spans: list[dict]) -> list[dict]:
+    """
+    Order spans into approximate reading order and coalesce same-style runs.
+
+    Spans are grouped into lines by *vertical overlap* rather than top-y
+    proximity, so baseline-aligned text of different font sizes (e.g. a drop
+    cap beside body text) stays on one line and is read left→right instead of
+    interleaving.  Lines are then ordered top→bottom.
+    """
     if not raw_spans:
         return []
 
-    # Approximate reading order: top→bottom, then left→right.
-    raw_spans.sort(key=lambda s: (s["bbox"]["y"], s["bbox"]["x"]))
-
-    # Coalesce runs that share style and sit on the same line.
-    merged: list[dict] = [raw_spans[0]]
-
-    for span in raw_spans[1:]:
-        prev = merged[-1]
-        same_style = prev["font"] == span["font"] and prev["color"] == span["color"]
-        same_line = abs(prev["bbox"]["y"] - span["bbox"]["y"]) < _LINE_TOL_PT
-
-        if same_style and same_line:
-            gap = span["bbox"]["x"] - (prev["bbox"]["x"] + prev["bbox"]["w"])
-            sep = " " if gap > prev["font"]["size"] * _SPACE_GAP_RATIO else ""
-            prev["text"] += sep + span["text"]
-            prev["bbox"] = _bbox_union(prev["bbox"], span["bbox"])
+    # Build lines greedily: a span joins the first existing line whose vertical
+    # band it mostly overlaps; otherwise it starts a new line.
+    raw_spans.sort(key=lambda s: s["bbox"]["y"])
+    lines: list[dict] = []
+    for span in raw_spans:
+        top = span["bbox"]["y"]
+        bottom = top + span["bbox"]["h"]
+        for line in lines:
+            overlap = min(bottom, line["bottom"]) - max(top, line["top"])
+            min_h = min(bottom - top, line["bottom"] - line["top"])
+            if min_h > 0 and overlap > _LINE_OVERLAP_RATIO * min_h:
+                line["spans"].append(span)
+                line["top"] = min(line["top"], top)
+                line["bottom"] = max(line["bottom"], bottom)
+                break
         else:
-            merged.append(span)
+            lines.append({"top": top, "bottom": bottom, "spans": [span]})
+
+    lines.sort(key=lambda line: line["top"])
+
+    # Within each line, read left→right and merge consecutive same-style runs.
+    merged: list[dict] = []
+    for line in lines:
+        spans = sorted(line["spans"], key=lambda s: s["bbox"]["x"])
+        line_merged: list[dict] = [spans[0]]
+        for span in spans[1:]:
+            prev = line_merged[-1]
+            same_style = prev["font"] == span["font"] and prev["color"] == span["color"]
+            if same_style:
+                gap = span["bbox"]["x"] - (prev["bbox"]["x"] + prev["bbox"]["w"])
+                sep = " " if gap > prev["font"]["size"] * _SPACE_GAP_RATIO else ""
+                prev["text"] += sep + span["text"]
+                prev["bbox"] = _bbox_union(prev["bbox"], span["bbox"])
+            else:
+                line_merged.append(span)
+        merged.extend(line_merged)
 
     return merged
 

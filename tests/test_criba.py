@@ -8,12 +8,63 @@ import criba
 from criba import (
     EncryptedPDFError,
     _bbox_union,
+    _coalesce_lines,
     _extract_images,
     _normalize_bbox,
     _normalize_pdf_date,
     _strip_subset_prefix,
     extract_pdf,
 )
+
+
+def _span(text, x, y, w, h, size=12.0):
+    """Build a minimal text-span dict for ordering tests."""
+    return {
+        "text": text,
+        "bbox": {"x": x, "y": y, "w": w, "h": h},
+        "font": {"name": "Test", "size": size, "weight": 400},
+        "color": {"r": 0, "g": 0, "b": 0, "a": 255},
+    }
+
+
+# ── _coalesce_lines ───────────────────────────────────────────────────────────
+
+
+def test_coalesce_lines_mixed_font_sizes_read_left_to_right():
+    """A large span on the right must not sort before a small span on its left.
+
+    Drop cap "T" (size 24, x=100) shares a baseline with body text (size 12,
+    x=0) — different top-y, overlapping vertical extent. Reading order is L→R.
+    """
+    big = _span("T", x=100, y=0, w=20, h=24, size=24)  # taller, to the right
+    small = _span("he rest", x=0, y=12, w=80, h=12, size=12)  # shorter, to the left
+
+    result = _coalesce_lines([big, small])
+
+    assert [s["text"] for s in result] == ["he rest", "T"]
+
+
+def test_coalesce_lines_separates_stacked_lines_top_to_bottom():
+    line2 = _span("second", x=0, y=30, w=50, h=12)
+    line1 = _span("first", x=0, y=0, w=50, h=12)
+
+    result = _coalesce_lines([line2, line1])
+
+    assert [s["text"] for s in result] == ["first", "second"]
+
+
+def test_coalesce_lines_merges_same_style_run_on_a_line():
+    a = _span("Hello", x=0, y=0, w=30, h=12)
+    b = _span("world", x=40, y=0, w=30, h=12)  # gap > 0.25*12 -> space inserted
+
+    result = _coalesce_lines([a, b])
+
+    assert len(result) == 1
+    assert result[0]["text"] == "Hello world"
+
+
+def test_coalesce_lines_empty():
+    assert _coalesce_lines([]) == []
 
 
 # ── _normalize_pdf_date ───────────────────────────────────────────────────────
