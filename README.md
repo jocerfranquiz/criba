@@ -55,6 +55,8 @@ result = extract_pdf("document.pdf", output_dir="output")
     "pdf_version": "1.7",
     "tagged": false
     // also: subject, creator, producer, creationdate, moddate, keywords
+    // creationdate/moddate are normalised to ISO-8601 (e.g. "2024-01-15T09:30:00+05:30");
+    // if a date can't be parsed, the raw PDF string (D:YYYYMMDD...) is kept as-is
   },
   "pages": [
     {

@@ -29,6 +29,8 @@ import argparse
 import ctypes
 import json
 import logging
+import re
+from datetime import datetime
 from pathlib import Path
 
 import pypdfium2 as pdfium
@@ -111,6 +113,39 @@ def _bbox_union(a: dict, b: dict) -> dict:
 
 # ── Metadata ─────────────────────────────────────────────────────────────────
 
+# PDF date string: D:YYYYMMDDHHmmSSOHH'mm'  (everything after the year optional).
+_PDF_DATE_RE = re.compile(
+    r"^(?:D:)?(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?"
+    r"(?:([Zz+\-])(\d{2})?'?(\d{2})?'?)?$"
+)
+
+
+def _normalize_pdf_date(raw: str) -> str:
+    """``D:20240115093000+05'30'`` → ``2024-01-15T09:30:00+05:30``.
+
+    Returns *raw* unchanged if it doesn't match the PDF date format or encodes
+    an impossible date (so no information is ever lost).
+    """
+    m = _PDF_DATE_RE.match(raw.strip())
+    if not m:
+        return raw
+
+    year, month, day, hour, minute, second, tzsign, tzh, tzm = m.groups()
+    month, day = month or "01", day or "01"
+    hour, minute, second = hour or "00", minute or "00", second or "00"
+
+    try:  # reject impossible dates (e.g. month 13) rather than emit garbage
+        datetime(int(year), int(month), int(day), int(hour), int(minute), int(second))
+    except ValueError:
+        return raw
+
+    iso = f"{year}-{month}-{day}T{hour}:{minute}:{second}"
+    if tzsign in ("Z", "z"):
+        iso += "+00:00"
+    elif tzsign in ("+", "-"):
+        iso += f"{tzsign}{tzh or '00'}:{tzm or '00'}"
+    return iso
+
 
 def _extract_metadata(doc: pdfium.PdfDocument) -> dict:
     meta: dict = {}
@@ -128,6 +163,8 @@ def _extract_metadata(doc: pdfium.PdfDocument) -> dict:
         ):
             v = raw.get(key, "")
             if v:
+                if key in ("CreationDate", "ModDate"):
+                    v = _normalize_pdf_date(v)
                 meta[key.lower()] = v
     except pdfium.PdfiumError:
         logger.debug("Metadata dict extraction failed", exc_info=True)

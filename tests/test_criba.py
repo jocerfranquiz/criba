@@ -10,9 +10,41 @@ from criba import (
     _bbox_union,
     _extract_images,
     _normalize_bbox,
+    _normalize_pdf_date,
     _strip_subset_prefix,
     extract_pdf,
 )
+
+
+# ── _normalize_pdf_date ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # Full timestamp with positive offset.
+        ("D:20240115093000+05'30'", "2024-01-15T09:30:00+05:30"),
+        # Negative offset.
+        ("D:20240115093000-08'00'", "2024-01-15T09:30:00-08:00"),
+        # Zulu / UTC.
+        ("D:20240115093000Z", "2024-01-15T09:30:00+00:00"),
+        # No "D:" prefix, still valid.
+        ("20240115093000Z", "2024-01-15T09:30:00+00:00"),
+        # Partial: year+month+day only -> time defaults to 00:00:00, no tz.
+        ("D:20240115", "2024-01-15T00:00:00"),
+        # Year only.
+        ("D:2024", "2024-01-01T00:00:00"),
+        # Offset hours without minutes.
+        ("D:20240115093000+05", "2024-01-15T09:30:00+05:00"),
+        # Impossible date -> returned unchanged.
+        ("D:20241345000000", "D:20241345000000"),
+        # Not a PDF date -> returned unchanged.
+        ("January 15, 2024", "January 15, 2024"),
+        ("", ""),
+    ],
+)
+def test_normalize_pdf_date(raw, expected):
+    assert _normalize_pdf_date(raw) == expected
 
 
 # ── _strip_subset_prefix ──────────────────────────────────────────────────────
