@@ -1,6 +1,6 @@
 # criba
 
-Minimal, fully-local PDF → JSON extractor.  
+Minimal, fully-local PDF to JSON raw data extractor.  
 Reads native-text PDFs via **pypdfium2** (Chrome's PDFium engine) and emits structured JSON with raw text, text spans, and extracted images.
 
 ## Install
