@@ -286,7 +286,7 @@ def test_extract_images_numbering_has_no_gap_on_failure(tmp_path, monkeypatch):
         def extract(self, prefix, fb_format="png"):
             calls["n"] += 1
             if calls["n"] == 1:
-                raise RuntimeError("first image fails")
+                raise criba.PdfiumError("first image fails")
             Path(prefix + ".png").write_bytes(b"x")  # mimic pdfium writing the file
 
     monkeypatch.setattr(criba, "PdfImage", FakeImage)

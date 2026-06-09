@@ -332,7 +332,7 @@ def _extract_images(
         # Native pixel size
         try:
             w_px, h_px = img.get_px_size()
-        except Exception:
+        except PdfiumError:
             w_px, h_px = 0, 0
 
         # Extract to file  (pypdfium2 appends the real extension)
@@ -341,7 +341,7 @@ def _extract_images(
 
         try:
             img.extract(str(dest_prefix), fb_format="png")
-        except Exception as exc:
+        except (PdfiumError, OSError, ValueError) as exc:
             logger.warning(
                 "Image extraction failed p%d fig%d: %s", page_idx + 1, fig_num, exc
             )
