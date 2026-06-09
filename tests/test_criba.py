@@ -67,6 +67,37 @@ def test_coalesce_lines_empty():
     assert _coalesce_lines([]) == []
 
 
+def test_coalesce_lines_line_overlap_param_splits_overlapping_spans():
+    """High line_overlap=1.0 forces near-identical spans onto separate lines."""
+    a = _span("top", x=0, y=0, w=30, h=12)
+    b = _span("bot", x=0, y=6, w=30, h=12)  # overlaps by 6/12 = 0.5 exactly
+
+    # With default 0.5 threshold (overlap must be *strictly* greater), these split.
+    result_default = _coalesce_lines([a, b])
+    assert len(result_default) == 2
+
+    # With a very low threshold they merge into one line.
+    result_low = _coalesce_lines([a, b], line_overlap=0.1)
+    assert len(result_low) == 1
+
+
+def test_coalesce_lines_space_gap_param_suppresses_space():
+    """High space_gap suppresses the inserted space; low threshold allows it."""
+    # gap=10pt; font size=12 -> gap/size=0.83, above default 0.25 -> space inserted
+    # Use fresh spans each call: _coalesce_lines mutates dicts in-place.
+    result_no_space = _coalesce_lines(
+        [_span("Hello", x=0, y=0, w=30, h=12), _span("world", x=40, y=0, w=30, h=12)],
+        space_gap=1000.0,
+    )
+    assert result_no_space[0]["text"] == "Helloworld"
+
+    result_space = _coalesce_lines(
+        [_span("Hello", x=0, y=0, w=30, h=12), _span("world", x=40, y=0, w=30, h=12)],
+        space_gap=0.0,
+    )
+    assert result_space[0]["text"] == "Hello world"
+
+
 # ── _normalize_pdf_date ───────────────────────────────────────────────────────
 
 
@@ -144,7 +175,7 @@ def test_extract_pdf_missing_file_raises(tmp_path):
 
 
 def _password_error():
-    return criba.pdfium.PdfiumError("bad password", err_code=criba._FPDF_ERR_PASSWORD)
+    return criba.PdfiumError("bad password", err_code=criba.FPDF_ERR_PASSWORD)
 
 
 def test_extract_pdf_encrypted_raises_friendly_error(tmp_path, monkeypatch):
@@ -156,7 +187,7 @@ def test_extract_pdf_encrypted_raises_friendly_error(tmp_path, monkeypatch):
     def boom(*a, **k):
         raise _password_error()
 
-    monkeypatch.setattr(criba.pdfium, "PdfDocument", boom)
+    monkeypatch.setattr(criba, "PdfDocument", boom)
 
     with pytest.raises(EncryptedPDFError, match="supply a password"):
         extract_pdf(pdf, output_dir=tmp_path / "out")
@@ -173,11 +204,11 @@ def test_extract_pdf_non_password_pdfium_error_propagates(tmp_path, monkeypatch)
     pdf.write_bytes(b"%PDF-1.4\n")
 
     def boom(*a, **k):
-        raise criba.pdfium.PdfiumError("corrupt", err_code=1)
+        raise criba.PdfiumError("corrupt", err_code=1)
 
-    monkeypatch.setattr(criba.pdfium, "PdfDocument", boom)
+    monkeypatch.setattr(criba, "PdfDocument", boom)
 
-    with pytest.raises(criba.pdfium.PdfiumError):
+    with pytest.raises(criba.PdfiumError):
         extract_pdf(pdf, output_dir=tmp_path / "out")
 
 
@@ -209,7 +240,7 @@ def test_extract_pdf_closes_handles_on_page_error(tmp_path, monkeypatch):
     pdf = tmp_path / "doc.pdf"
     pdf.write_bytes(b"%PDF-1.4\n")  # presence-only; never really parsed
 
-    monkeypatch.setattr(criba.pdfium, "PdfDocument", lambda *a, **k: FakeDoc())
+    monkeypatch.setattr(criba, "PdfDocument", lambda *a, **k: FakeDoc())
     monkeypatch.setattr(criba, "_extract_metadata", lambda doc: {})
     monkeypatch.setattr(
         criba,
@@ -237,7 +268,7 @@ def test_extract_images_numbering_has_no_gap_on_failure(tmp_path, monkeypatch):
         raw = object()
 
         def get_bounds(self):
-            return (0.0, 0.0, 10.0, 10.0)
+            return 0.0, 0.0, 10.0, 10.0
 
     class FakePage:
         def get_objects(self, filter):  # noqa: A002 - matches pdfium signature
@@ -258,7 +289,7 @@ def test_extract_images_numbering_has_no_gap_on_failure(tmp_path, monkeypatch):
                 raise RuntimeError("first image fails")
             Path(prefix + ".png").write_bytes(b"x")  # mimic pdfium writing the file
 
-    monkeypatch.setattr(criba.pdfium, "PdfImage", FakeImage)
+    monkeypatch.setattr(criba, "PdfImage", FakeImage)
 
     results = _extract_images(
         FakePage(), page_idx=0, page_height=100.0, images_dir=images_dir
@@ -280,13 +311,13 @@ def test_extract_metadata_logs_pdfium_errors_at_debug(caplog):
             return 3
 
         def get_metadata_dict(self):
-            raise criba.pdfium.PdfiumError("no metadata")
+            raise criba.PdfiumError("no metadata")
 
         def get_version(self):
-            raise criba.pdfium.PdfiumError("no version")
+            raise criba.PdfiumError("no version")
 
         def is_tagged(self):
-            raise criba.pdfium.PdfiumError("no tag info")
+            raise criba.PdfiumError("no tag info")
 
     with caplog.at_level("DEBUG", logger="criba"):
         meta = criba._extract_metadata(FakeDoc())

@@ -30,11 +30,17 @@ import ctypes
 import json
 import logging
 import re
+
 from datetime import datetime
 from pathlib import Path
 
-import pypdfium2 as pdfium
-import pypdfium2.raw as pdfium_c
+from pypdfium2 import PdfDocument, PdfiumError, PdfTextObj, PdfPage, PdfImage
+from pypdfium2.raw import (
+    FPDF_PAGEOBJ_IMAGE,
+    FPDF_PAGEOBJ_TEXT,
+    FPDF_ERR_PASSWORD,
+    FPDFPageObj_GetFillColor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,19 +51,13 @@ class EncryptedPDFError(Exception):
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-_PAGEOBJ_TEXT = pdfium_c.FPDF_PAGEOBJ_TEXT  # 1
-_PAGEOBJ_IMAGE = pdfium_c.FPDF_PAGEOBJ_IMAGE  # 3
-
-# PDFium error code for a missing/incorrect password on an encrypted document.
-_FPDF_ERR_PASSWORD = pdfium_c.FPDF_ERR_PASSWORD  # 4
-
 # Two spans share a line when their vertical extents overlap by at least this
 # fraction of the shorter span's height.  Using overlap (not top-y proximity)
 # keeps baseline-aligned text of different font sizes on the same line.
-_LINE_OVERLAP_RATIO = 0.5
+LINE_OVERLAP_RATIO = 0.5
 
 # Minimum gap (as fraction of font size) to insert a space between merged spans.
-_SPACE_GAP_RATIO = 0.25
+SPACE_GAP_RATIO = 0.25
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ def _fill_color(raw_handle) -> dict:
     g = ctypes.c_uint(0)
     b = ctypes.c_uint(0)
     a = ctypes.c_uint(0)
-    ok = pdfium_c.FPDFPageObj_GetFillColor(
+    ok = FPDFPageObj_GetFillColor(
         raw_handle,
         ctypes.byref(r),
         ctypes.byref(g),
@@ -149,7 +149,7 @@ def _normalize_pdf_date(raw: str) -> str:
     return iso
 
 
-def _extract_metadata(doc: pdfium.PdfDocument) -> dict:
+def _extract_metadata(doc: PdfDocument) -> dict:
     meta: dict = {}
     try:
         raw = doc.get_metadata_dict()
@@ -168,7 +168,7 @@ def _extract_metadata(doc: pdfium.PdfDocument) -> dict:
                 if key in ("CreationDate", "ModDate"):
                     v = _normalize_pdf_date(v)
                 meta[key.lower()] = v
-    except pdfium.PdfiumError:
+    except PdfiumError:
         logger.debug("Metadata dict extraction failed", exc_info=True)
 
     meta["page_count"] = len(doc)
@@ -177,12 +177,12 @@ def _extract_metadata(doc: pdfium.PdfDocument) -> dict:
         v = doc.get_version()  # None if new doc or version undeterminable
         if v is not None:
             meta["pdf_version"] = f"{v // 10}.{v % 10}"  # 14 → "1.4", 20 → "2.0"
-    except pdfium.PdfiumError:
+    except PdfiumError:
         logger.debug("PDF version extraction failed", exc_info=True)
 
     try:
         meta["tagged"] = doc.is_tagged()
-    except pdfium.PdfiumError:
+    except PdfiumError:
         logger.debug("Tagged-PDF check failed", exc_info=True)
 
     return meta
@@ -191,7 +191,12 @@ def _extract_metadata(doc: pdfium.PdfDocument) -> dict:
 # ── Text spans ───────────────────────────────────────────────────────────────
 
 
-def _extract_text_spans(page: pdfium.PdfPage, page_height: float) -> list[dict]:
+def _extract_text_spans(
+    page: PdfPage,
+    page_height: float,
+    line_overlap: float = LINE_OVERLAP_RATIO,
+    space_gap: float = SPACE_GAP_RATIO,
+) -> list[dict]:
     """
     Pull every text page-object, sort into approximate reading order,
     and coalesce consecutive runs that share font + colour on the same line.
@@ -200,8 +205,8 @@ def _extract_text_spans(page: pdfium.PdfPage, page_height: float) -> list[dict]:
     raw_spans: list[dict] = []
 
     try:
-        for obj in page.get_objects(filter=[_PAGEOBJ_TEXT]):
-            text_obj = pdfium.PdfTextObj(obj.raw, textpage=tp)
+        for obj in page.get_objects(filter=[FPDF_PAGEOBJ_TEXT]):
+            text_obj = PdfTextObj(obj.raw, textpage=tp)
 
             text = text_obj.extract()
             if not text:
@@ -233,10 +238,14 @@ def _extract_text_spans(page: pdfium.PdfPage, page_height: float) -> list[dict]:
     finally:
         tp.close()
 
-    return _coalesce_lines(raw_spans)
+    return _coalesce_lines(raw_spans, line_overlap=line_overlap, space_gap=space_gap)
 
 
-def _coalesce_lines(raw_spans: list[dict]) -> list[dict]:
+def _coalesce_lines(
+    raw_spans: list[dict],
+    line_overlap: float = LINE_OVERLAP_RATIO,
+    space_gap: float = SPACE_GAP_RATIO,
+) -> list[dict]:
     """
     Order spans into approximate reading order and coalesce same-style runs.
 
@@ -258,7 +267,7 @@ def _coalesce_lines(raw_spans: list[dict]) -> list[dict]:
         for line in lines:
             overlap = min(bottom, line["bottom"]) - max(top, line["top"])
             min_h = min(bottom - top, line["bottom"] - line["top"])
-            if min_h > 0 and overlap > _LINE_OVERLAP_RATIO * min_h:
+            if min_h > 0 and overlap > line_overlap * min_h:
                 line["spans"].append(span)
                 line["top"] = min(line["top"], top)
                 line["bottom"] = max(line["bottom"], bottom)
@@ -266,19 +275,19 @@ def _coalesce_lines(raw_spans: list[dict]) -> list[dict]:
         else:
             lines.append({"top": top, "bottom": bottom, "spans": [span]})
 
-    lines.sort(key=lambda line: line["top"])
+    lines.sort(key=lambda _: _["top"])
 
     # Within each line, read left→right and merge consecutive same-style runs.
     merged: list[dict] = []
     for line in lines:
-        spans = sorted(line["spans"], key=lambda s: s["bbox"]["x"])
+        spans = sorted(line["spans"], key=lambda _: _["bbox"]["x"])
         line_merged: list[dict] = [spans[0]]
         for span in spans[1:]:
             prev = line_merged[-1]
             same_style = prev["font"] == span["font"] and prev["color"] == span["color"]
             if same_style:
                 gap = span["bbox"]["x"] - (prev["bbox"]["x"] + prev["bbox"]["w"])
-                sep = " " if gap > prev["font"]["size"] * _SPACE_GAP_RATIO else ""
+                sep = " " if gap > prev["font"]["size"] * space_gap else ""
                 prev["text"] += sep + span["text"]
                 prev["bbox"] = _bbox_union(prev["bbox"], span["bbox"])
             else:
@@ -291,7 +300,7 @@ def _coalesce_lines(raw_spans: list[dict]) -> list[dict]:
 # ── Raw text ─────────────────────────────────────────────────────────────────
 
 
-def _extract_raw_text(page: pdfium.PdfPage) -> str:
+def _extract_raw_text(page: PdfPage) -> str:
     """Full page text in PDFium's built-in reading order."""
     tp = page.get_textpage()
     try:
@@ -306,15 +315,15 @@ def _extract_raw_text(page: pdfium.PdfPage) -> str:
 
 
 def _extract_images(
-    page: pdfium.PdfPage, page_idx: int, page_height: float, images_dir: Path
+    page: PdfPage, page_idx: int, page_height: float, images_dir: Path
 ) -> list[dict]:
     results: list[dict] = []
 
-    for obj in page.get_objects(filter=[_PAGEOBJ_IMAGE]):
+    for obj in page.get_objects(filter=[FPDF_PAGEOBJ_IMAGE]):
         # Allocate the figure number from successful writes only, so a failed
         # extraction doesn't leave a gap (next success reuses this number).
         fig_num = len(results) + 1
-        img = pdfium.PdfImage(obj.raw, page=page)
+        img = PdfImage(obj.raw, page=page)
 
         # Bounding box
         left, bottom, right, top = obj.get_bounds()
@@ -366,12 +375,20 @@ def _extract_images(
 
 
 def extract_pdf(
-    pdf_path: str | Path, output_dir: str | Path = "output", password: str | None = None
+    pdf_path: str | Path,
+    output_dir: str | Path = "output",
+    password: str | None = None,
+    line_overlap: float = LINE_OVERLAP_RATIO,
+    space_gap: float = SPACE_GAP_RATIO,
 ) -> dict:
     """
     Extract all raw data from *pdf_path* and write the result to *output_dir*.
 
     Pass *password* to open an encrypted/password-protected PDF.
+    *line_overlap* controls how much two spans must vertically overlap (as a
+    fraction of the shorter span's height) to be grouped on the same line.
+    *space_gap* controls the minimum horizontal gap (as a fraction of font size)
+    that triggers an inserted space between merged spans.
 
     Returns the full result dict (same object serialised as JSON).
 
@@ -390,9 +407,9 @@ def extract_pdf(
     images_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        doc = pdfium.PdfDocument(str(pdf_path), password=password)
-    except pdfium.PdfiumError as exc:
-        if getattr(exc, "err_code", None) == _FPDF_ERR_PASSWORD:
+        doc = PdfDocument(str(pdf_path), password=password)
+    except PdfiumError as exc:
+        if getattr(exc, "err_code", None) == FPDF_ERR_PASSWORD:
             hint = (
                 "incorrect password"
                 if password is not None
@@ -415,7 +432,9 @@ def extract_pdf(
                 w, h = page.get_width(), page.get_height()
 
                 raw_text = _extract_raw_text(page)
-                spans = _extract_text_spans(page, h)
+                spans = _extract_text_spans(
+                    page, h, line_overlap=line_overlap, space_gap=space_gap
+                )
                 images = _extract_images(page, i, h, images_dir)
 
                 page_data: dict = {
@@ -462,6 +481,20 @@ def main() -> None:
     ap.add_argument(
         "-p", "--password", default=None, help="Password for an encrypted PDF"
     )
+    ap.add_argument(
+        "--line-overlap",
+        type=float,
+        default=LINE_OVERLAP_RATIO,
+        metavar="RATIO",
+        help=f"Min vertical overlap fraction to group spans on the same line (default: {LINE_OVERLAP_RATIO})",
+    )
+    ap.add_argument(
+        "--space-gap",
+        type=float,
+        default=SPACE_GAP_RATIO,
+        metavar="RATIO",
+        help=f"Min gap/font-size ratio to insert a space between merged spans (default: {SPACE_GAP_RATIO})",
+    )
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -471,7 +504,13 @@ def main() -> None:
     )
 
     try:
-        result = extract_pdf(args.pdf, args.output, password=args.password)
+        result = extract_pdf(
+            args.pdf,
+            args.output,
+            password=args.password,
+            line_overlap=args.line_overlap,
+            space_gap=args.space_gap,
+        )
     except EncryptedPDFError as exc:
         raise SystemExit(f"error: {exc}")
 
