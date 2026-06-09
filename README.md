@@ -1,7 +1,15 @@
 # criba
 
-Minimal, fully-local PDF to JSON raw data extractor.  
-Reads native-text PDFs via **pypdfium2** (Chrome's PDFium engine) and emits structured JSON with raw text, text spans, and extracted images.
+[![CI](https://github.com/jocerfranquiz/criba/actions/workflows/ci.yml/badge.svg)](https://github.com/jocerfranquiz/criba/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://github.com/pre-commit/pre-commit)
+[![Pillow](https://img.shields.io/badge/Pillow-imaging-blue)](https://python-pillow.org/)
+[![License: GPL v3](https://img.shields.io/github/license/jocerfranquiz/criba)](LICENSE)
+
+Minimal, fully-local PDF extractor → JSON, Markdown, and images — for RAG, LLM agents, and pipelines.  
+Reads native-text PDFs via **pypdfium2** (Chrome's PDFium engine) and emits structured JSON (metadata, text spans, image refs), best-effort Markdown, and the embedded images — all in memory, with no cloud calls.
 
 ## Install
 
@@ -86,17 +94,17 @@ to_markdown(result, path=None) -> str        # returns Markdown; writes if path 
 to_images(result, base_dir) -> list[Path]    # writes image files; returns paths written
 ```
 
-**Parameters** (shared by `extract` and `convert`):
+**Parameters:**
 
 | Param | Meaning |
 |---|---|
-| `password` | Password for an encrypted PDF. |
-| `line_overlap` | Min vertical overlap, as a fraction of the shorter span's height, for two spans to be grouped on the same line (default `0.5`). |
-| `space_gap` | Min horizontal gap, as a fraction of font size, that inserts a space between merged spans (default `0.25`). |
-| `validate` | Validate the JSON-serialisable view against `schema.OUTPUT_SCHEMA` before returning. |
-| `output_dir` | *(`convert` only)* Where to write `<stem>.json`, `<stem>.md`, and `<stem>_images/` (default `output`). |
+| `password` | Password for an encrypted PDF. *(all functions)* |
+| `line_overlap` | Min vertical overlap, as a fraction of the shorter span's height, for two spans to be grouped on the same line (default `0.5`). *(all functions)* |
+| `space_gap` | Min horizontal gap, as a fraction of font size, that inserts a space between merged spans (default `0.25`). *(all functions)* |
+| `validate` | Validate the JSON-serialisable view against `schema.OUTPUT_SCHEMA` before returning. *(`extract`, `convert`)* |
+| `output_dir` | Where to write `<stem>.json`, `<stem>.md`, and `<stem>_images/` (default `output`). *(`convert` only)* |
 
-**Exceptions** (raised by `extract` and `convert`):
+**Exceptions** (raised by `extract`, `convert`, and `extract_text`):
 
 | Exception | When |
 |---|---|
@@ -208,3 +216,4 @@ Embedded image objects are extracted natively (JPEG/JP2 pass-through when possib
 
 - **pypdfium2** Python bindings for PDFium (Apache 2.0 / BSD-3)
 - **Pillow** fallback image encoding when PDFium can't extract natively
+- **jsonschema** validates output against `schema.OUTPUT_SCHEMA`
