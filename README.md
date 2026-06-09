@@ -83,7 +83,7 @@ to_images(result, base_dir) -> list[Path]    # writes image files; returns paths
 | `password` | Password for an encrypted PDF. |
 | `line_overlap` | Min vertical overlap, as a fraction of the shorter span's height, for two spans to be grouped on the same line (default `0.5`). |
 | `space_gap` | Min horizontal gap, as a fraction of font size, that inserts a space between merged spans (default `0.25`). |
-| `validate` | Validate the JSON-serialisable view against `schema.OUTPUT_SCHEMA` before returning (needs the optional `jsonschema` package). |
+| `validate` | Validate the JSON-serialisable view against `schema.OUTPUT_SCHEMA` before returning. |
 | `output_dir` | *(`convert` only)* Where to write `<stem>.json`, `<stem>.md`, and `<stem>_images/` (default `output`). |
 
 **Exceptions** (raised by `extract` and `convert`):

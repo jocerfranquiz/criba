@@ -3,4 +3,3 @@
 pytest>=9.0
 ruff>=0.15
 pre-commit>=4.6
-jsonschema>=4.0  # optional: powers extract(validate=True) / schema.validate_output

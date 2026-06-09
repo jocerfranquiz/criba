@@ -48,8 +48,7 @@ def main() -> None:
     ap.add_argument(
         "--validate",
         action="store_true",
-        help="Validate the result against schema.OUTPUT_SCHEMA before writing "
-        "(requires the optional 'jsonschema' package)",
+        help="Validate the result against schema.OUTPUT_SCHEMA before writing",
     )
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
