@@ -260,10 +260,11 @@ def _coalesce_lines(
         return []
 
     # Build lines greedily: a span joins the first existing line whose vertical
-    # band it mostly overlaps; otherwise it starts a new line.
-    raw_spans.sort(key=lambda _: _["bbox"]["y"])
+    # band it mostly overlaps; otherwise it starts a new line.  Sort a copy so
+    # the caller's list is left untouched.
+    ordered = sorted(raw_spans, key=lambda _: _["bbox"]["y"])
     lines: list[dict] = []
-    for span in raw_spans:
+    for span in ordered:
         top = span["bbox"]["y"]
         bottom = top + span["bbox"]["h"]
         for line in lines:
@@ -282,20 +283,22 @@ def _coalesce_lines(
     lines.sort(key=lambda _: _["top"])
 
     # Within each line, read left→right and merge consecutive same-style runs.
+    # Each output span is a fresh dict (never an input span), so callers' span
+    # dicts are never mutated — accumulation happens on the copy.
     merged: list[dict] = []
     for line in lines:
         spans = sorted(line["spans"], key=lambda _: _["bbox"]["x"])
-        line_merged: list[dict] = [spans[0]]
+        line_merged: list[dict] = [dict(spans[0])]
         for span in spans[1:]:
             prev = line_merged[-1]
             same_style = prev["font"] == span["font"] and prev["color"] == span["color"]
             if same_style:
                 gap = span["bbox"]["x"] - (prev["bbox"]["x"] + prev["bbox"]["w"])
                 sep = " " if gap > prev["font"]["size"] * space_gap else ""
-                prev["text"] += sep + span["text"]
+                prev["text"] = prev["text"] + sep + span["text"]
                 prev["bbox"] = _bbox_union(prev["bbox"], span["bbox"])
             else:
-                line_merged.append(span)
+                line_merged.append(dict(span))
         merged.extend(line_merged)
 
     return merged

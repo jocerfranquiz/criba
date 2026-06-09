@@ -69,6 +69,25 @@ def test_coalesce_lines_empty():
     assert _coalesce_lines([]) == []
 
 
+def test_coalesce_lines_does_not_mutate_input():
+    """Inputs (list order and dict contents) are untouched; calls are repeatable."""
+    import copy
+
+    spans = [
+        _span("Hello", x=0, y=0, w=30, h=12),
+        _span("world", x=40, y=0, w=30, h=12),
+    ]
+    snapshot = copy.deepcopy(spans)
+
+    first = _coalesce_lines(spans)
+    assert spans == snapshot, "input list/dicts were mutated by the first call"
+
+    # A second call on the same list must reproduce the first result exactly.
+    second = _coalesce_lines(spans)
+    assert spans == snapshot, "input list/dicts were mutated by the second call"
+    assert [s["text"] for s in first] == [s["text"] for s in second] == ["Hello world"]
+
+
 def test_coalesce_lines_line_overlap_param_splits_overlapping_spans():
     """High line_overlap=1.0 forces near-identical spans onto separate lines."""
     a = _span("top", x=0, y=0, w=30, h=12)
@@ -86,7 +105,6 @@ def test_coalesce_lines_line_overlap_param_splits_overlapping_spans():
 def test_coalesce_lines_space_gap_param_suppresses_space():
     """High space_gap suppresses the inserted space; low threshold allows it."""
     # gap=10pt; font size=12 -> gap/size=0.83, above default 0.25 -> space inserted
-    # Use fresh spans each call: _coalesce_lines mutates dicts in-place.
     result_no_space = _coalesce_lines(
         [_span("Hello", x=0, y=0, w=30, h=12), _span("world", x=40, y=0, w=30, h=12)],
         space_gap=1000.0,
