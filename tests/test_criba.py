@@ -13,6 +13,7 @@ from criba import (
     _normalize_bbox,
     _normalize_pdf_date,
     _strip_subset_prefix,
+    extract_data,
     extract_pdf,
 )
 from output_schema import OUTPUT_SCHEMA, validate_output
@@ -254,6 +255,47 @@ def test_extract_pdf_closes_handles_on_page_error(tmp_path, monkeypatch):
 
     assert closed["page"], "page handle was not closed on error"
     assert closed["doc"], "document handle was not closed on error"
+
+
+def test_extract_data_writes_nothing_to_disk(tmp_path, monkeypatch):
+    """The pure path returns the dict without creating any files or directories."""
+
+    class FakePage:
+        def get_width(self):
+            return 612.0
+
+        def get_height(self):
+            return 792.0
+
+        def close(self):
+            pass
+
+    class FakeDoc:
+        def __len__(self):
+            return 1
+
+        def get_page(self, i):
+            return FakePage()
+
+        def close(self):
+            pass
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    monkeypatch.setattr(criba, "PdfDocument", lambda *a, **k: FakeDoc())
+    monkeypatch.setattr(criba, "_extract_metadata", lambda doc: {"page_count": 1})
+    monkeypatch.setattr(criba, "_extract_raw_text", lambda page: "hello\n")
+    monkeypatch.setattr(criba, "_extract_text_spans", lambda *a, **k: [])
+
+    before = set(tmp_path.iterdir())
+    result = extract_data(pdf)
+    after = set(tmp_path.iterdir())
+
+    assert before == after, "extract_data wrote something to disk"
+    assert result["source_file"] == "doc.pdf"
+    assert result["pages"][0]["raw_text"] == "hello\n"
+    assert result["pages"][0]["images"] == []  # images skipped when images_dir is None
 
 
 # ── _extract_images ───────────────────────────────────────────────────────────

@@ -43,6 +43,15 @@ from criba import extract_pdf
 result = extract_pdf("document.pdf", output_dir="output")
 ```
 
+To get the result dict **without writing anything to disk** (e.g. when calling
+criba as a tool), use `extract_data` — it skips the JSON file, and skips image
+extraction unless you point it at an existing `images_dir`:
+
+```python
+from criba import extract_data
+result = extract_data("document.pdf")  # no files written; images omitted
+```
+
 ## JSON Schema
 
 ```jsonc

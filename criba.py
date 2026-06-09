@@ -378,6 +378,128 @@ def _extract_images(
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
 
+def _open_document(pdf_path: Path, password: str | None) -> PdfDocument:
+    """Open *pdf_path*, mapping a password failure to ``EncryptedPDFError``."""
+    try:
+        return PdfDocument(str(pdf_path), password=password)
+    except PdfiumError as exc:
+        if getattr(exc, "err_code", None) == FPDF_ERR_PASSWORD:
+            hint = (
+                "incorrect password"
+                if password is not None
+                else "encrypted; supply a password via the 'password' argument "
+                "(or --password on the CLI)"
+            )
+            raise EncryptedPDFError(f"{pdf_path.name} is {hint}.") from exc
+        raise
+
+
+def _build_result(
+    doc: PdfDocument,
+    source_name: str,
+    images_dir: Path | None,
+    line_overlap: float,
+    space_gap: float,
+) -> dict:
+    """Assemble the full result dict from an already-open *doc*.
+
+    Performs no JSON persistence — it only builds and returns the dict.  When
+    *images_dir* is ``None`` embedded images are skipped entirely (nothing is
+    written to disk); otherwise image bitmaps are extracted into *images_dir*
+    (PDFium writes those files natively, so that path is inherently on-disk).
+
+    The caller owns the *doc* handle (this function does not close it); each
+    per-page handle is opened and closed here.
+    """
+    result: dict = {
+        "source_file": source_name,
+        "metadata": _extract_metadata(doc),
+        "pages": [],
+    }
+
+    for i in range(len(doc)):
+        page = doc.get_page(i)
+        try:
+            w, h = page.get_width(), page.get_height()
+
+            raw_text = _extract_raw_text(page)
+            spans = _extract_text_spans(
+                page, h, line_overlap=line_overlap, space_gap=space_gap
+            )
+            images = (
+                _extract_images(page, i, h, images_dir)
+                if images_dir is not None
+                else []
+            )
+
+            page_data: dict = {
+                "page_number": i + 1,
+                "width": round(w, 2),
+                "height": round(h, 2),
+                "raw_text": raw_text,
+                "text_spans": spans,
+                "images": images,
+            }
+
+            # Heuristic: rendered page but zero text → probably scanned
+            if not raw_text.strip() and not spans:
+                page_data["warning"] = "no_text_layer"
+
+            result["pages"].append(page_data)
+        finally:
+            page.close()
+
+    return result
+
+
+def extract_data(
+    pdf_path: str | Path,
+    *,
+    password: str | None = None,
+    images_dir: str | Path | None = None,
+    line_overlap: float = LINE_OVERLAP_RATIO,
+    space_gap: float = SPACE_GAP_RATIO,
+    validate: bool = False,
+) -> dict:
+    """
+    Extract *pdf_path* and return the result dict **without writing any JSON**.
+
+    No output directory is created and no ``document.json`` is produced — this
+    is the path for callers (e.g. an LLM agent tool) that only want the data.
+    Pass *images_dir* (it must already exist) to also extract embedded image
+    bitmaps there; leave it ``None`` to skip images and write nothing to disk.
+
+    See :func:`extract_pdf` for the *line_overlap*, *space_gap*, and *validate*
+    parameters.  :func:`extract_pdf` wraps this function and adds persistence.
+
+    Raises:
+        FileNotFoundError: if *pdf_path* does not exist.
+        EncryptedPDFError: if the PDF is encrypted and *password* is missing/wrong.
+        jsonschema.ValidationError: if *validate* is set and the result does not
+            conform to the schema.
+    """
+    pdf_path = Path(pdf_path)
+    if not pdf_path.exists():
+        raise FileNotFoundError(pdf_path)
+
+    doc = _open_document(pdf_path, password)
+    try:
+        result = _build_result(
+            doc,
+            pdf_path.name,
+            Path(images_dir) if images_dir is not None else None,
+            line_overlap,
+            space_gap,
+        )
+    finally:
+        doc.close()
+
+    if validate:
+        validate_output(result)
+
+    return result
+
+
 def extract_pdf(
     pdf_path: str | Path,
     output_dir: str | Path = "output",
@@ -397,7 +519,8 @@ def extract_pdf(
     Set *validate* to check the result against ``output_schema.OUTPUT_SCHEMA``
     before it is written (requires the optional ``jsonschema`` package).
 
-    Returns the full result dict (same object serialised as JSON).
+    Returns the full result dict (same object serialised as JSON).  Use
+    :func:`extract_data` instead if you want the dict without any disk writes.
 
     Raises:
         FileNotFoundError: if *pdf_path* does not exist.
@@ -415,58 +538,14 @@ def extract_pdf(
     images_dir = out / f"{stem}_images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        doc = PdfDocument(str(pdf_path), password=password)
-    except PdfiumError as exc:
-        if getattr(exc, "err_code", None) == FPDF_ERR_PASSWORD:
-            hint = (
-                "incorrect password"
-                if password is not None
-                else "encrypted; supply a password via the 'password' argument "
-                "(or --password on the CLI)"
-            )
-            raise EncryptedPDFError(f"{pdf_path.name} is {hint}.") from exc
-        raise
-
-    try:
-        result: dict = {
-            "source_file": pdf_path.name,
-            "metadata": _extract_metadata(doc),
-            "pages": [],
-        }
-
-        for i in range(len(doc)):
-            page = doc.get_page(i)
-            try:
-                w, h = page.get_width(), page.get_height()
-
-                raw_text = _extract_raw_text(page)
-                spans = _extract_text_spans(
-                    page, h, line_overlap=line_overlap, space_gap=space_gap
-                )
-                images = _extract_images(page, i, h, images_dir)
-
-                page_data: dict = {
-                    "page_number": i + 1,
-                    "width": round(w, 2),
-                    "height": round(h, 2),
-                    "raw_text": raw_text,
-                    "text_spans": spans,
-                    "images": images,
-                }
-
-                # Heuristic: rendered page but zero text → probably scanned
-                if not raw_text.strip() and not spans:
-                    page_data["warning"] = "no_text_layer"
-
-                result["pages"].append(page_data)
-            finally:
-                page.close()
-    finally:
-        doc.close()
-
-    if validate:
-        validate_output(result)
+    result = extract_data(
+        pdf_path,
+        password=password,
+        images_dir=images_dir,
+        line_overlap=line_overlap,
+        space_gap=space_gap,
+        validate=validate,
+    )
 
     # Persist JSON
     json_path = out / f"{stem}.json"
