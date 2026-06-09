@@ -235,7 +235,11 @@ def test_extract_pdf_non_password_pdfium_error_propagates(tmp_path, monkeypatch)
 def test_extract_pdf_closes_handles_on_page_error(tmp_path, monkeypatch):
     """A failure mid-page must still close the page and document handles."""
 
-    closed = {"page": False, "doc": False}
+    closed = {"page": False, "doc": False, "textpage": False}
+
+    class FakeTextpage:
+        def close(self):
+            closed["textpage"] = True
 
     class FakePage:
         def get_width(self):
@@ -243,6 +247,9 @@ def test_extract_pdf_closes_handles_on_page_error(tmp_path, monkeypatch):
 
         def get_height(self):
             return 792.0
+
+        def get_textpage(self):
+            return FakeTextpage()
 
         def close(self):
             closed["page"] = True
@@ -265,12 +272,13 @@ def test_extract_pdf_closes_handles_on_page_error(tmp_path, monkeypatch):
     monkeypatch.setattr(
         criba,
         "_extract_raw_text",
-        lambda page: (_ for _ in ()).throw(RuntimeError("boom")),
+        lambda textpage: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
     with pytest.raises(RuntimeError, match="boom"):
         extract_pdf(pdf, output_dir=tmp_path / "out")
 
+    assert closed["textpage"], "textpage handle was not closed on error"
     assert closed["page"], "page handle was not closed on error"
     assert closed["doc"], "document handle was not closed on error"
 
@@ -278,12 +286,19 @@ def test_extract_pdf_closes_handles_on_page_error(tmp_path, monkeypatch):
 def test_extract_data_writes_nothing_to_disk(tmp_path, monkeypatch):
     """The pure path returns the dict without creating any files or directories."""
 
+    class FakeTextpage:
+        def close(self):
+            pass
+
     class FakePage:
         def get_width(self):
             return 612.0
 
         def get_height(self):
             return 792.0
+
+        def get_textpage(self):
+            return FakeTextpage()
 
         def close(self):
             pass
@@ -303,7 +318,7 @@ def test_extract_data_writes_nothing_to_disk(tmp_path, monkeypatch):
 
     monkeypatch.setattr(criba, "PdfDocument", lambda *a, **k: FakeDoc())
     monkeypatch.setattr(criba, "_extract_metadata", lambda doc: {"page_count": 1})
-    monkeypatch.setattr(criba, "_extract_raw_text", lambda page: "hello\n")
+    monkeypatch.setattr(criba, "_extract_raw_text", lambda textpage: "hello\n")
     monkeypatch.setattr(criba, "_extract_text_spans", lambda *a, **k: [])
 
     before = set(tmp_path.iterdir())

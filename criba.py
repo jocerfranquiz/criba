@@ -34,7 +34,14 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from pypdfium2 import PdfDocument, PdfiumError, PdfTextObj, PdfPage, PdfImage
+from pypdfium2 import (
+    PdfDocument,
+    PdfiumError,
+    PdfTextObj,
+    PdfTextPage,
+    PdfPage,
+    PdfImage,
+)
 from pypdfium2.raw import (
     FPDF_PAGEOBJ_IMAGE,
     FPDF_PAGEOBJ_TEXT,
@@ -195,6 +202,7 @@ def _extract_metadata(doc: PdfDocument) -> dict:
 
 def _extract_text_spans(
     page: PdfPage,
+    textpage: PdfTextPage,
     page_height: float,
     line_overlap: float = LINE_OVERLAP_RATIO,
     space_gap: float = SPACE_GAP_RATIO,
@@ -202,43 +210,42 @@ def _extract_text_spans(
     """
     Pull every text page-object, sort into approximate reading order,
     and coalesce consecutive runs that share font + colour on the same line.
+
+    *textpage* is owned by the caller (opened once per page and reused for
+    raw-text extraction too); this function does not close it.
     """
-    tp = page.get_textpage()
     raw_spans: list[dict] = []
 
-    try:
-        for obj in page.get_objects(filter=[FPDF_PAGEOBJ_TEXT]):
-            text_obj = PdfTextObj(obj.raw, textpage=tp)
+    for obj in page.get_objects(filter=[FPDF_PAGEOBJ_TEXT]):
+        text_obj = PdfTextObj(obj.raw, textpage=textpage)
 
-            text = text_obj.extract()
-            if not text:
-                continue
+        text = text_obj.extract()
+        if not text:
+            continue
 
-            font = text_obj.get_font()
-            font_name = _strip_subset_prefix(
-                font.get_base_name() or font.get_family_name() or "unknown"
-            )
-            font_size = round(text_obj.get_font_size(), 2)
-            font_weight = font.get_weight()
-            color = _fill_color(obj.raw)
+        font = text_obj.get_font()
+        font_name = _strip_subset_prefix(
+            font.get_base_name() or font.get_family_name() or "unknown"
+        )
+        font_size = round(text_obj.get_font_size(), 2)
+        font_weight = font.get_weight()
+        color = _fill_color(obj.raw)
 
-            left, bottom, right, top = obj.get_bounds()
-            bbox = _normalize_bbox(left, bottom, right, top, page_height)
+        left, bottom, right, top = obj.get_bounds()
+        bbox = _normalize_bbox(left, bottom, right, top, page_height)
 
-            raw_spans.append(
-                {
-                    "text": text,
-                    "bbox": bbox,
-                    "font": {
-                        "name": font_name,
-                        "size": font_size,
-                        "weight": font_weight,
-                    },
-                    "color": color,
-                }
-            )
-    finally:
-        tp.close()
+        raw_spans.append(
+            {
+                "text": text,
+                "bbox": bbox,
+                "font": {
+                    "name": font_name,
+                    "size": font_size,
+                    "weight": font_weight,
+                },
+                "color": color,
+            }
+        )
 
     return _coalesce_lines(raw_spans, line_overlap=line_overlap, space_gap=space_gap)
 
@@ -307,14 +314,13 @@ def _coalesce_lines(
 # ── Raw text ─────────────────────────────────────────────────────────────────
 
 
-def _extract_raw_text(page: PdfPage) -> str:
-    """Full page text in PDFium's built-in reading order."""
-    tp = page.get_textpage()
-    try:
-        n = tp.count_chars()
-        text = tp.get_text_range(0, n) if n > 0 else ""
-    finally:
-        tp.close()
+def _extract_raw_text(textpage: PdfTextPage) -> str:
+    """Full page text in PDFium's built-in reading order.
+
+    *textpage* is owned by the caller; this function does not close it.
+    """
+    n = textpage.count_chars()
+    text = textpage.get_text_range(0, n) if n > 0 else ""
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
@@ -425,10 +431,16 @@ def _build_result(
         try:
             w, h = page.get_width(), page.get_height()
 
-            raw_text = _extract_raw_text(page)
-            spans = _extract_text_spans(
-                page, h, line_overlap=line_overlap, space_gap=space_gap
-            )
+            # One textpage per page, shared by raw-text and span extraction.
+            textpage = page.get_textpage()
+            try:
+                raw_text = _extract_raw_text(textpage)
+                spans = _extract_text_spans(
+                    page, textpage, h, line_overlap=line_overlap, space_gap=space_gap
+                )
+            finally:
+                textpage.close()
+
             images = (
                 _extract_images(page, i, h, images_dir)
                 if images_dir is not None
