@@ -13,10 +13,15 @@ from criba import (
     _normalize_bbox,
     _normalize_pdf_date,
     _strip_subset_prefix,
-    extract_data,
-    extract_pdf,
+    convert,
+    extract,
+    to_images,
+    to_json,
+    to_markdown, validate_output,
 )
-from output_schema import OUTPUT_SCHEMA, validate_output
+from schema import OUTPUT_SCHEMA
+
+SAMPLE_PDF = Path(__file__).resolve().parent / "sample.pdf"
 
 
 def _span(text, x, y, w, h, size=12.0):
@@ -186,19 +191,19 @@ def test_bbox_union_covers_both():
     assert _bbox_union(a, b) == {"x": 0.0, "y": 0.0, "w": 15.0, "h": 15.0}
 
 
-# ── extract_pdf ───────────────────────────────────────────────────────────────
+# ── convert ───────────────────────────────────────────────────────────────
 
 
-def test_extract_pdf_missing_file_raises(tmp_path):
+def test_convert_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
-        extract_pdf(tmp_path / "does_not_exist.pdf", output_dir=tmp_path / "out")
+        convert(tmp_path / "does_not_exist.pdf", output_dir=tmp_path / "out")
 
 
 def _password_error():
     return criba.PdfiumError("bad password", err_code=criba.FPDF_ERR_PASSWORD)
 
 
-def test_extract_pdf_encrypted_raises_friendly_error(tmp_path, monkeypatch):
+def test_convert_encrypted_raises_friendly_error(tmp_path, monkeypatch):
     """A password-coded PdfiumError becomes an EncryptedPDFError with guidance."""
 
     pdf = tmp_path / "secret.pdf"
@@ -210,14 +215,14 @@ def test_extract_pdf_encrypted_raises_friendly_error(tmp_path, monkeypatch):
     monkeypatch.setattr(criba, "PdfDocument", boom)
 
     with pytest.raises(EncryptedPDFError, match="supply a password"):
-        extract_pdf(pdf, output_dir=tmp_path / "out")
+        convert(pdf, output_dir=tmp_path / "out")
 
     # With a (wrong) password supplied, the message reflects that instead.
     with pytest.raises(EncryptedPDFError, match="incorrect password"):
-        extract_pdf(pdf, output_dir=tmp_path / "out", password="nope")
+        convert(pdf, output_dir=tmp_path / "out", password="nope")
 
 
-def test_extract_pdf_non_password_pdfium_error_propagates(tmp_path, monkeypatch):
+def test_convert_non_password_pdfium_error_propagates(tmp_path, monkeypatch):
     """Non-password PdfiumErrors are not masked as EncryptedPDFError."""
 
     pdf = tmp_path / "broken.pdf"
@@ -229,10 +234,10 @@ def test_extract_pdf_non_password_pdfium_error_propagates(tmp_path, monkeypatch)
     monkeypatch.setattr(criba, "PdfDocument", boom)
 
     with pytest.raises(criba.PdfiumError):
-        extract_pdf(pdf, output_dir=tmp_path / "out")
+        convert(pdf, output_dir=tmp_path / "out")
 
 
-def test_extract_pdf_closes_handles_on_page_error(tmp_path, monkeypatch):
+def test_convert_closes_handles_on_page_error(tmp_path, monkeypatch):
     """A failure mid-page must still close the page and document handles."""
 
     closed = {"page": False, "doc": False, "textpage": False}
@@ -276,14 +281,14 @@ def test_extract_pdf_closes_handles_on_page_error(tmp_path, monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="boom"):
-        extract_pdf(pdf, output_dir=tmp_path / "out")
+        convert(pdf, output_dir=tmp_path / "out")
 
     assert closed["textpage"], "textpage handle was not closed on error"
     assert closed["page"], "page handle was not closed on error"
     assert closed["doc"], "document handle was not closed on error"
 
 
-def test_extract_data_writes_nothing_to_disk(tmp_path, monkeypatch):
+def test_extract_writes_nothing_to_disk(tmp_path, monkeypatch):
     """The pure path returns the dict without creating any files or directories."""
 
     class FakeTextpage:
@@ -299,6 +304,9 @@ def test_extract_data_writes_nothing_to_disk(tmp_path, monkeypatch):
 
         def get_textpage(self):
             return FakeTextpage()
+
+        def get_objects(self, filter):  # noqa: A002 - matches pdfium signature
+            return []
 
         def close(self):
             pass
@@ -322,23 +330,20 @@ def test_extract_data_writes_nothing_to_disk(tmp_path, monkeypatch):
     monkeypatch.setattr(criba, "_extract_text_spans", lambda *a, **k: [])
 
     before = set(tmp_path.iterdir())
-    result = extract_data(pdf)
+    result = extract(pdf)
     after = set(tmp_path.iterdir())
 
-    assert before == after, "extract_data wrote something to disk"
+    assert before == after, "extract wrote something to disk"
     assert result["source_file"] == "doc.pdf"
     assert result["pages"][0]["raw_text"] == "hello\n"
-    assert result["pages"][0]["images"] == []  # images skipped when images_dir is None
+    assert result["pages"][0]["images"] == []  # no image objects on the page
 
 
 # ── _extract_images ───────────────────────────────────────────────────────────
 
 
-def test_extract_images_numbering_has_no_gap_on_failure(tmp_path, monkeypatch):
+def test_extract_images_numbering_has_no_gap_on_failure(monkeypatch):
     """If the first image fails to extract, the next success is fig_001, not fig_002."""
-
-    images_dir = tmp_path / "imgs"
-    images_dir.mkdir()
 
     class FakeObj:
         raw = object()
@@ -359,21 +364,24 @@ def test_extract_images_numbering_has_no_gap_on_failure(tmp_path, monkeypatch):
         def get_px_size(self):
             return (4, 4)
 
-        def extract(self, prefix, fb_format="png"):
+        def get_filters(self):
+            return ["FlateDecode"]  # -> re-encoded PNG
+
+        def extract(self, dest, fb_format="png"):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise criba.PdfiumError("first image fails")
-            Path(prefix + ".png").write_bytes(b"x")  # mimic pdfium writing the file
+            dest.write(b"\x89PNG\r\n")  # mimic pdfium writing into the buffer
 
     monkeypatch.setattr(criba, "PdfImage", FakeImage)
 
-    results = _extract_images(
-        FakePage(), page_idx=0, page_height=100.0, images_dir=images_dir
-    )
+    results = _extract_images(FakePage(), page_idx=0, page_height=100.0, stem="doc")
 
     assert len(results) == 1
     assert results[0]["index"] == 1
-    assert results[0]["file"].endswith("page_001_fig_001.png")
+    assert results[0]["ext"] == "png"
+    assert results[0]["file"] == "doc_images/page_001_fig_001.png"
+    assert results[0]["data"] == b"\x89PNG\r\n"  # bytes held in memory, not on disk
 
 
 # ── _extract_metadata ─────────────────────────────────────────────────────────
@@ -430,7 +438,7 @@ def test_extract_metadata_omits_version_when_none(caplog):
     assert caplog.records == []
 
 
-# ── output_schema ─────────────────────────────────────────────────────────────
+# ── schema ────────────────────────────────────────────────────────────────────
 
 jsonschema = pytest.importorskip("jsonschema")
 
@@ -459,6 +467,7 @@ def _minimal_result():
                         "index": 1,
                         "bbox": {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0},
                         "size_px": {"width": 4, "height": 4},
+                        "ext": "png",
                         "file": "doc_images/page_001_fig_001.png",
                     }
                 ],
@@ -504,3 +513,78 @@ def test_validate_output_rejects_bad_warning_enum():
     result["pages"][0]["warning"] = "something_else"
     with pytest.raises(jsonschema.ValidationError):
         validate_output(result)
+
+
+# ── pipeline (real fixture PDF) ───────────────────────────────────────────────
+
+pytestmark_fixture = pytest.mark.skipif(
+    not SAMPLE_PDF.exists(),
+    reason="sample.pdf fixture missing; run tests/make_sample_pdf.py",
+)
+
+
+@pytestmark_fixture
+def test_extract_fixture_in_memory_no_disk_writes(tmp_path, monkeypatch):
+    """extract() on the real fixture yields data + in-memory image bytes only."""
+    monkeypatch.chdir(tmp_path)  # any stray writes would land here
+    before = set(tmp_path.iterdir())
+
+    result = extract(SAMPLE_PDF, validate=True)
+
+    assert set(tmp_path.iterdir()) == before, "extract wrote to disk"
+    assert result["metadata"]["title"] == "criba sample document"
+    assert result["metadata"]["page_count"] == 2
+    assert len(result["pages"]) == 2
+
+    img = result["pages"][0]["images"][0]
+    assert img["ext"] == "jpg"  # DCTDecode passthrough, not re-encoded
+    assert img["data"][:2] == b"\xff\xd8"  # JPEG SOI magic
+    assert result["pages"][1]["images"] == []  # second page has no images
+
+
+@pytestmark_fixture
+def test_to_json_excludes_image_data_and_validates(tmp_path):
+    """to_json drops the in-memory bytes and emits a schema-conformant file."""
+    import json
+
+    result = extract(SAMPLE_PDF)
+    dest = tmp_path / "out" / "sample.json"
+    to_json(result, dest)
+
+    loaded = json.loads(dest.read_text())
+    assert "data" not in loaded["pages"][0]["images"][0]
+    assert loaded["pages"][0]["images"][0]["file"].endswith(".jpg")
+    validate_output(loaded)  # the on-disk JSON view conforms
+
+
+@pytestmark_fixture
+def test_to_images_writes_image_bytes(tmp_path):
+    """to_images materialises exactly the in-memory bytes, only where images exist."""
+    result = extract(SAMPLE_PDF)
+    written = to_images(result, tmp_path)
+
+    assert len(written) == 1
+    dest = tmp_path / "sample_images" / "page_001_fig_001.jpg"
+    assert written == [dest]
+    assert dest.read_bytes() == result["pages"][0]["images"][0]["data"]
+
+
+@pytestmark_fixture
+def test_to_markdown_infers_headings_and_inlines_images():
+    """to_markdown() ranks font sizes into headings and inlines image references."""
+    text = to_markdown(extract(SAMPLE_PDF))
+
+    assert "# Sample Document Title" in text  # 24pt -> h1
+    assert "## Second Page Heading" in text  # 18pt -> h2
+    assert "This is body text for testing extraction." in text  # 12pt body, no '#'
+    assert "![](sample_images/page_001_fig_001.jpg)" in text
+
+
+@pytestmark_fixture
+def test_convert_writes_json_md_and_images(tmp_path):
+    """The convenience wrapper produces the full json + md + images output set."""
+    convert(SAMPLE_PDF, output_dir=tmp_path)
+
+    assert (tmp_path / "sample.json").is_file()
+    assert (tmp_path / "sample.md").is_file()
+    assert (tmp_path / "sample_images" / "page_001_fig_001.jpg").is_file()

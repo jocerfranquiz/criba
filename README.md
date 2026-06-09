@@ -19,7 +19,7 @@ pre-commit install
 ## Usage
 
 ```bash
-python criba.py document.pdf [-o output_dir] [-p PASSWORD]
+python cli.py document.pdf [-o output_dir] [-p PASSWORD]
 ```
 
 Use `-p/--password` for encrypted PDFs. Without it, an encrypted document
@@ -29,7 +29,8 @@ exits with a clear `error: ... is encrypted` message rather than a raw traceback
 
 ```
 output/
-├── document.json
+├── document.json          # structure: metadata, text spans, image refs
+├── document.md            # best-effort Markdown for RAG / agents
 └── document_images/
     ├── page_001_fig_001.png
     ├── page_003_fig_002.jpg
@@ -38,19 +39,60 @@ output/
 
 ### Programmatic
 
-```python
-from criba import extract_pdf
-result = extract_pdf("document.pdf", output_dir="output")
-```
-
-To get the result dict **without writing anything to disk** (e.g. when calling
-criba as a tool), use `extract_data` — it skips the JSON file, and skips image
-extraction unless you point it at an existing `images_dir`:
+criba is a small ETL pipeline: **extract** once into an in-memory dict, then
+serialise to whichever outputs you need.
 
 ```python
-from criba import extract_data
-result = extract_data("document.pdf")  # no files written; images omitted
+from criba import extract, to_json, to_markdown, to_images
+
+result = extract("document.pdf")   # pure: no disk writes; images held in memory
+
+markdown = to_markdown(result)             # structure-aware Markdown string for RAG
+json_str = to_json(result)                 # JSON string (image bytes omitted)
+to_markdown(result, "out/document.md")     # pass a path to also write it
+to_json(result, "out/document.json")       # structure for later md/html rendering
+to_images(result, "out")                   # write images under out/<stem>_images/
 ```
+
+`extract` returns a self-contained dict — image bytes ride along in each image
+entry's `data` field — so an agent/tool can consume it directly without touching
+the filesystem. `to_markdown` and `to_json` **return** their text (and optionally
+write it when given a path); `to_images` writes the embedded bitmaps and returns
+the paths. `convert("document.pdf", output_dir="output")` is the convenience
+pipeline that runs `extract` and writes all three outputs at once.
+
+`to_markdown()` is **best-effort, RAG-oriented**: it infers headings from
+font-size clusters, bold/italic from font weight and name, and inlines image
+references. The goal is retrieval quality, not visual fidelity — faithful
+Markdown/HTML rendering is a separate concern built on top of the JSON.
+
+### API reference
+
+```python
+extract(pdf_path, *, password=None, line_overlap=0.5, space_gap=0.25, validate=False) -> dict
+convert(pdf_path, output_dir="output", password=None, line_overlap=0.5, space_gap=0.25, validate=False) -> dict
+to_json(result, path=None) -> str            # returns JSON; writes if path given
+to_markdown(result, path=None) -> str        # returns Markdown; writes if path given
+to_images(result, base_dir) -> list[Path]    # writes image files; returns paths written
+```
+
+**Parameters** (shared by `extract` and `convert`):
+
+| Param | Meaning |
+|---|---|
+| `password` | Password for an encrypted PDF. |
+| `line_overlap` | Min vertical overlap, as a fraction of the shorter span's height, for two spans to be grouped on the same line (default `0.5`). |
+| `space_gap` | Min horizontal gap, as a fraction of font size, that inserts a space between merged spans (default `0.25`). |
+| `validate` | Validate the JSON-serialisable view against `schema.OUTPUT_SCHEMA` before returning (needs the optional `jsonschema` package). |
+| `output_dir` | *(`convert` only)* Where to write `<stem>.json`, `<stem>.md`, and `<stem>_images/` (default `output`). |
+
+**Exceptions** (raised by `extract` and `convert`):
+
+| Exception | When |
+|---|---|
+| `FileNotFoundError` | `pdf_path` does not exist. |
+| `EncryptedPDFError` | The PDF is encrypted and `password` is missing or wrong. |
+| `jsonschema.ValidationError` | `validate=True` and the result does not conform to the schema. |
 
 ## JSON Schema
 
@@ -86,7 +128,9 @@ result = extract_data("document.pdf")  # no files written; images omitted
           "index": 1,
           "bbox": { "x": 72.0, "y": 200.0, "w": 468.0, "h": 300.0 },
           "size_px": { "width": 1024, "height": 768 },
+          "ext": "png",   // jpg/jp2 for passthrough streams, png when re-encoded
           "file": "document_images/page_001_fig_001.png"
+          // in-memory results also carry "data" (raw bytes); to_json omits it
         }
       ],
       "warning": "no_text_layer"  // only present when applicable

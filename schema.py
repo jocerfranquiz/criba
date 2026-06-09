@@ -1,9 +1,14 @@
 """JSON Schema for criba's PDF-extraction output.
 
-Single source of truth for the structure that :func:`criba.extract_pdf`
-returns and serialises. Keep this in sync with the dicts built across
+Single source of truth for the structure that :func:`criba.extract` produces
+and :func:`criba.to_json` writes. Keep this in sync with the dicts built across
 ``criba.py``; :func:`validate_output` (and the ``validate=`` flag on
-``extract_pdf``) checks a result against this schema.
+``extract`` / ``convert``) checks a result against this schema.
+
+Note this describes the **JSON-serialisable view** of a result: the in-memory
+``data`` bytes carried on each image entry by :func:`criba.extract` are dropped
+before serialisation (and before validation), so they are not part of the
+schema.
 
 The schema doubles as a machine-readable contract for downstream consumers
 (e.g. an LLM agent calling criba as a tool) that previously had only the
@@ -108,9 +113,16 @@ OUTPUT_SCHEMA: dict = {
                     "required": ["width", "height"],
                     "additionalProperties": False,
                 },
+                "ext": {
+                    "type": "string",
+                    "description": (
+                        "Encoded image format / filename extension: 'jpg' or "
+                        "'jp2' for passthrough streams, 'png' when re-encoded."
+                    ),
+                },
                 "file": {"type": "string"},
             },
-            "required": ["index", "bbox", "size_px", "file"],
+            "required": ["index", "bbox", "size_px", "ext", "file"],
             "additionalProperties": False,
         },
         "page": {
@@ -138,19 +150,3 @@ OUTPUT_SCHEMA: dict = {
 }
 
 
-def validate_output(result: dict) -> None:
-    """Validate *result* against :data:`OUTPUT_SCHEMA`.
-
-    Raises:
-        jsonschema.ValidationError: if *result* does not conform to the schema.
-        ImportError: if the optional ``jsonschema`` package is not installed.
-    """
-    try:
-        import jsonschema
-    except ImportError as exc:
-        raise ImportError(
-            "validate_output requires the optional 'jsonschema' package "
-            "(pip install jsonschema)."
-        ) from exc
-
-    jsonschema.validate(instance=result, schema=OUTPUT_SCHEMA)

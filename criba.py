@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
 """
-criba.py  Minimal, fully-local PDF → JSON extractor.
+criba.py  Minimal, fully-local PDF extractor.
 
-Uses pypdfium2 (PDFium) to read native-text PDFs and emit structured JSON
-containing document metadata, per-page text spans with font/size/color/bbox,
-raw reading-order text, and extracted embedded images.
+Uses pypdfium2 (PDFium) to read native-text PDFs into a structured, in-memory
+result — document metadata, per-page text spans with font/size/color/bbox, raw
+reading-order text, and embedded images decoded to bytes — then serialises it
+to JSON (structure), Markdown (RAG text), and image files.
+
+A small ETL pipeline: :func:`extract` reads a PDF into a dict; :func:`to_json`,
+:func:`to_markdown`, and :func:`to_images` serialise it; :func:`convert` runs
+the whole thing and writes every output.
 
 Coordinates are normalised to a **top-left origin** (y increases downward).
 
 Usage
 -----
-    python criba.py document.pdf [-o output]
+    python cli.py document.pdf [-o output]    # command-line entry point
+
+    from criba import extract, convert        # or use the library directly
 
 Produces::
 
     output/
     ├── document.json
+    ├── document.md
     └── document_images/
         ├── page_003_fig_001.png
         └── ...
@@ -25,13 +33,15 @@ Dependencies: pypdfium2, Pillow (fallback image encoding)
 
 from __future__ import annotations
 
-import argparse
 import ctypes
+import io
 import json
 import logging
 import re
 
+from collections import Counter
 from datetime import datetime
+from jsonschema import validate as validate_json
 from pathlib import Path
 
 from pypdfium2 import (
@@ -49,7 +59,7 @@ from pypdfium2.raw import (
     FPDFPageObj_GetFillColor,
 )
 
-from output_schema import validate_output
+from schema import OUTPUT_SCHEMA
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +78,11 @@ LINE_OVERLAP_RATIO = 0.5
 # Minimum gap (as fraction of font size) to insert a space between merged spans.
 SPACE_GAP_RATIO = 0.25
 
+# PDF date string: D:YYYYMMDDHHmmSSOHH'mm'  (everything after the year optional).
+_PDF_DATE_RE = re.compile(
+    r"^(?:D:)?(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?"
+    r"(?:([Zz+\-])(\d{2})?'?(\d{2})?'?)?$"
+)
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -122,20 +137,9 @@ def _bbox_union(a: dict, b: dict) -> dict:
     }
 
 
-# ── Metadata ─────────────────────────────────────────────────────────────────
-
-# PDF date string: D:YYYYMMDDHHmmSSOHH'mm'  (everything after the year optional).
-_PDF_DATE_RE = re.compile(
-    r"^(?:D:)?(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?"
-    r"(?:([Zz+\-])(\d{2})?'?(\d{2})?'?)?$"
-)
-
-
 def _normalize_pdf_date(raw: str) -> str:
-    """``D:20240115093000+05'30'`` → ``2024-01-15T09:30:00+05:30``.
-
-    Returns *raw* unchanged if it doesn't match the PDF date format or encodes
-    an impossible date (so no information is ever lost).
+    """``D:20240115093000+05'30'`` → ``2024-01-15T09:30:00+05:30``; returns *raw*
+    unchanged if it doesn't match the format or encodes an impossible date.
     """
     m = _PDF_DATE_RE.match(raw.strip())
     if not m:
@@ -156,6 +160,8 @@ def _normalize_pdf_date(raw: str) -> str:
     elif tzsign in ("+", "-"):
         iso += f"{tzsign}{tzh or '00'}:{tzm or '00'}"
     return iso
+
+# ── Metadata ─────────────────────────────────────────────────────────────────
 
 
 def _extract_metadata(doc: PdfDocument) -> dict:
@@ -199,69 +205,15 @@ def _extract_metadata(doc: PdfDocument) -> dict:
 
 # ── Text spans ───────────────────────────────────────────────────────────────
 
-
-def _extract_text_spans(
-    page: PdfPage,
-    textpage: PdfTextPage,
-    page_height: float,
-    line_overlap: float = LINE_OVERLAP_RATIO,
-    space_gap: float = SPACE_GAP_RATIO,
-) -> list[dict]:
-    """
-    Pull every text page-object, sort into approximate reading order,
-    and coalesce consecutive runs that share font + colour on the same line.
-
-    *textpage* is owned by the caller (opened once per page and reused for
-    raw-text extraction too); this function does not close it.
-    """
-    raw_spans: list[dict] = []
-
-    for obj in page.get_objects(filter=[FPDF_PAGEOBJ_TEXT]):
-        text_obj = PdfTextObj(obj.raw, textpage=textpage)
-
-        text = text_obj.extract()
-        if not text:
-            continue
-
-        font = text_obj.get_font()
-        font_name = _strip_subset_prefix(
-            font.get_base_name() or font.get_family_name() or "unknown"
-        )
-        font_size = round(text_obj.get_font_size(), 2)
-        font_weight = font.get_weight()
-        color = _fill_color(obj.raw)
-
-        left, bottom, right, top = obj.get_bounds()
-        bbox = _normalize_bbox(left, bottom, right, top, page_height)
-
-        raw_spans.append(
-            {
-                "text": text,
-                "bbox": bbox,
-                "font": {
-                    "name": font_name,
-                    "size": font_size,
-                    "weight": font_weight,
-                },
-                "color": color,
-            }
-        )
-
-    return _coalesce_lines(raw_spans, line_overlap=line_overlap, space_gap=space_gap)
-
-
 def _coalesce_lines(
     raw_spans: list[dict],
     line_overlap: float = LINE_OVERLAP_RATIO,
     space_gap: float = SPACE_GAP_RATIO,
 ) -> list[dict]:
-    """
-    Order spans into approximate reading order and coalesce same-style runs.
+    """Order spans into reading order and coalesce same-style runs.
 
-    Spans are grouped into lines by *vertical overlap* rather than top-y
-    proximity, so baseline-aligned text of different font sizes (e.g. a drop
-    cap beside body text) stays on one line and is read left→right instead of
-    interleaving.  Lines are then ordered top→bottom.
+    Spans group into lines by vertical *overlap* (not top-y), so mixed-size
+    baseline-aligned text reads left→right; lines are ordered top→bottom.
     """
     if not raw_spans:
         return []
@@ -311,6 +263,53 @@ def _coalesce_lines(
     return merged
 
 
+def _extract_text_spans(
+    page: PdfPage,
+    textpage: PdfTextPage,
+    page_height: float,
+    line_overlap: float = LINE_OVERLAP_RATIO,
+    space_gap: float = SPACE_GAP_RATIO,
+) -> list[dict]:
+    """Pull text page-objects and coalesce same-font/colour runs per line.
+
+    *textpage* is owned by the caller (shared with raw-text extraction); this
+    function does not close it.
+    """
+    raw_spans: list[dict] = []
+
+    for obj in page.get_objects(filter=[FPDF_PAGEOBJ_TEXT]):
+        text_obj = PdfTextObj(obj.raw, textpage=textpage)
+
+        text = text_obj.extract()
+        if not text:
+            continue
+
+        font = text_obj.get_font()
+        font_name = _strip_subset_prefix(
+            font.get_base_name() or font.get_family_name() or "unknown"
+        )
+        font_size = round(text_obj.get_font_size(), 2)
+        font_weight = font.get_weight()
+        color = _fill_color(obj.raw)
+
+        left, bottom, right, top = obj.get_bounds()
+        bbox = _normalize_bbox(left, bottom, right, top, page_height)
+
+        raw_spans.append(
+            {
+                "text": text,
+                "bbox": bbox,
+                "font": {
+                    "name": font_name,
+                    "size": font_size,
+                    "weight": font_weight,
+                },
+                "color": color,
+            }
+        )
+
+    return _coalesce_lines(raw_spans, line_overlap=line_overlap, space_gap=space_gap)
+
 # ── Raw text ─────────────────────────────────────────────────────────────────
 
 
@@ -327,14 +326,35 @@ def _extract_raw_text(textpage: PdfTextPage) -> str:
 # ── Images ───────────────────────────────────────────────────────────────────
 
 
+def _image_ext(img: PdfImage) -> str:
+    """Extension matching what :meth:`PdfImage.extract` emits: ``jpg``/``jp2``
+    for verbatim JPEG/JPEG-2000 passthrough, else ``png`` (re-encoded).
+    """
+    try:
+        filters = img.get_filters()
+    except PdfiumError:
+        return "png"
+    last = filters[-1] if filters else ""
+    if last == "DCTDecode":
+        return "jpg"
+    if last == "JPXDecode":
+        return "jp2"
+    return "png"
+
+
 def _extract_images(
-    page: PdfPage, page_idx: int, page_height: float, images_dir: Path
+    page: PdfPage, page_idx: int, page_height: float, stem: str
 ) -> list[dict]:
+    """Extract embedded images as in-memory bytes (no disk writes).
+
+    Each result carries the encoded ``data`` plus a relative ``file`` path for a
+    later :func:`to_images` call; JPEG/JP2 pass through, else re-encoded to PNG.
+    """
     results: list[dict] = []
 
     for obj in page.get_objects(filter=[FPDF_PAGEOBJ_IMAGE]):
-        # Allocate the figure number from successful writes only, so a failed
-        # extraction doesn't leave a gap (next success reuses this number).
+        # Allocate the figure number from successful extractions only, so a
+        # failure doesn't leave a gap (the next success reuses this number).
         fig_num = len(results) + 1
         img = PdfImage(obj.raw, page=page)
 
@@ -348,28 +368,22 @@ def _extract_images(
         except PdfiumError:
             w_px, h_px = 0, 0
 
-        # Extract to file  (pypdfium2 appends the real extension)
-        stem = f"page_{page_idx + 1:03d}_fig_{fig_num:03d}"
-        dest_prefix = images_dir / stem
-
+        # Extract into memory.  Writing to a BytesIO keeps PDFium's quality-
+        # preserving passthrough (the extension is computed separately, since
+        # pdfium only reports it when writing to a file path).
+        ext = _image_ext(img)
+        buf = io.BytesIO()
         try:
-            img.extract(str(dest_prefix), fb_format="png")
+            img.extract(buf, fb_format="png")
         except (PdfiumError, OSError, ValueError) as exc:
             logger.warning(
                 "Image extraction failed p%d fig%d: %s", page_idx + 1, fig_num, exc
             )
             continue
 
-        # Discover the file that was actually written
-        written = None
-        for ext in (".png", ".jpg", ".jp2"):
-            candidate = images_dir / (stem + ext)
-            if candidate.exists():
-                written = candidate
-                break
-
-        if written is None:
-            logger.warning("No output file found for p%d fig%d", page_idx + 1, fig_num)
+        data = buf.getvalue()
+        if not data:
+            logger.warning("Empty image data for p%d fig%d", page_idx + 1, fig_num)
             continue
 
         results.append(
@@ -377,7 +391,9 @@ def _extract_images(
                 "index": fig_num,
                 "bbox": bbox,
                 "size_px": {"width": w_px, "height": h_px},
-                "file": str(written.relative_to(images_dir.parent)),
+                "ext": ext,
+                "file": f"{stem}_images/page_{page_idx + 1:03d}_fig_{fig_num:03d}.{ext}",
+                "data": data,
             }
         )
 
@@ -406,18 +422,13 @@ def _open_document(pdf_path: Path, password: str | None) -> PdfDocument:
 def _build_result(
     doc: PdfDocument,
     source_name: str,
-    images_dir: Path | None,
+    stem: str,
     line_overlap: float,
     space_gap: float,
 ) -> dict:
-    """Assemble the full result dict from an already-open *doc*.
+    """Assemble the result dict from an already-open *doc*, in memory.
 
-    Performs no JSON persistence — it only builds and returns the dict.  When
-    *images_dir* is ``None`` embedded images are skipped entirely (nothing is
-    written to disk); otherwise image bitmaps are extracted into *images_dir*
-    (PDFium writes those files natively, so that path is inherently on-disk).
-
-    The caller owns the *doc* handle (this function does not close it); each
+    No disk writes (images decoded to bytes). The caller owns *doc*; each
     per-page handle is opened and closed here.
     """
     result: dict = {
@@ -441,11 +452,7 @@ def _build_result(
             finally:
                 textpage.close()
 
-            images = (
-                _extract_images(page, i, h, images_dir)
-                if images_dir is not None
-                else []
-            )
+            images = _extract_images(page, i, h, stem)
 
             page_data: dict = {
                 "page_number": i + 1,
@@ -467,31 +474,18 @@ def _build_result(
     return result
 
 
-def extract_data(
+def extract(
     pdf_path: str | Path,
     *,
     password: str | None = None,
-    images_dir: str | Path | None = None,
     line_overlap: float = LINE_OVERLAP_RATIO,
     space_gap: float = SPACE_GAP_RATIO,
     validate: bool = False,
 ) -> dict:
-    """
-    Extract *pdf_path* and return the result dict **without writing any JSON**.
+    """Extract *pdf_path* into a result dict, fully in memory (no disk writes).
 
-    No output directory is created and no ``document.json`` is produced — this
-    is the path for callers (e.g. an LLM agent tool) that only want the data.
-    Pass *images_dir* (it must already exist) to also extract embedded image
-    bitmaps there; leave it ``None`` to skip images and write nothing to disk.
-
-    See :func:`extract_pdf` for the *line_overlap*, *space_gap*, and *validate*
-    parameters.  :func:`extract_pdf` wraps this function and adds persistence.
-
-    Raises:
-        FileNotFoundError: if *pdf_path* does not exist.
-        EncryptedPDFError: if the PDF is encrypted and *password* is missing/wrong.
-        jsonschema.ValidationError: if *validate* is set and the result does not
-            conform to the schema.
+    Images are decoded to in-memory bytes, so the dict is self-contained for the
+    ``to_*`` serialisers or direct use. See the README for params and exceptions.
     """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
@@ -500,22 +494,174 @@ def extract_data(
     doc = _open_document(pdf_path, password)
     try:
         result = _build_result(
-            doc,
-            pdf_path.name,
-            Path(images_dir) if images_dir is not None else None,
-            line_overlap,
-            space_gap,
+            doc, pdf_path.name, pdf_path.stem, line_overlap, space_gap
         )
     finally:
         doc.close()
 
     if validate:
-        validate_output(result)
+        validate_output(_json_view(result))
 
     return result
 
 
-def extract_pdf(
+# ── Serialisers ──────────────────────────────────────────────────────────────
+
+
+def _json_view(result: dict) -> dict:
+    """Return *result* without the in-memory image ``data`` bytes.
+
+    This is the JSON-serialisable shape (``schema.OUTPUT_SCHEMA``); bytes are
+    materialised separately by :func:`to_images`.
+    """
+    view = {k: v for k, v in result.items() if k != "pages"}
+    view["pages"] = []
+    for page in result["pages"]:
+        page_view = dict(page)
+        page_view["images"] = [
+            {k: v for k, v in img.items() if k != "data"} for img in page["images"]
+        ]
+        view["pages"].append(page_view)
+    return view
+
+
+def to_json(result: dict, path: str | Path | None = None) -> str:
+    """Serialise the document to a JSON string; write it too if *path* is given.
+
+    Image bytes are omitted; each image keeps its ``file`` reference for a
+    companion :func:`to_images` call.
+    """
+    text = json.dumps(_json_view(result), indent=2, ensure_ascii=False)
+    if path is not None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return text
+
+
+def to_images(result: dict, base_dir: str | Path) -> list[Path]:
+    """Write every extracted image under *base_dir* (honouring its ``file`` path).
+
+    Creates ``<stem>_images/`` only when needed and returns the paths written;
+    passthrough images keep ``.jpg``/``.jp2``, others are PNG.
+    """
+    base_dir = Path(base_dir)
+    written: list[Path] = []
+    for page in result["pages"]:
+        for img in page["images"]:
+            dest = base_dir / img["file"]
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(img["data"])
+            written.append(dest)
+    return written
+
+
+def _emphasise(span: dict) -> str:
+    """Wrap a span's text in Markdown emphasis inferred from its font."""
+    text = span["text"]
+    name = span["font"]["name"].lower()
+    bold = span["font"].get("weight", 0) >= 700 or "bold" in name
+    italic = "italic" in name or "oblique" in name
+    if bold:
+        text = f"**{text}**"
+    if italic:
+        text = f"*{text}*"
+    return text
+
+
+def _group_lines(spans: list[dict]) -> list[dict]:
+    """Regroup the flat span list into visual lines by vertical position.
+
+    Spans whose tops sit within half a line height are grouped, then ordered
+    top→bottom and left→right.
+    """
+    lines: list[dict] = []
+    for span in sorted(spans, key=lambda s: (s["bbox"]["y"], s["bbox"]["x"])):
+        y: float = span["bbox"]["y"]
+        h: float = span["bbox"]["h"]
+        size: float = span["font"]["size"]
+        for line in lines:
+            line_y: float = line["y"]
+            line_h: float = line["h"]
+            if abs(y - line_y) <= 0.5 * max(h, line_h):
+                line["spans"].append(span)
+                line["size"] = max(line["size"], size)
+                line["h"] = max(line_h, h)
+                break
+        else:
+            lines.append({"y": y, "h": h, "size": size, "spans": [span]})
+
+    for line in lines:
+        line["spans"].sort(key=lambda s: s["bbox"]["x"])
+    lines.sort(key=lambda _: _["y"])
+    return lines
+
+
+def _heading_levels(pages_lines: list[list[dict]]) -> dict[int, int]:
+    """Map (rounded) font sizes to heading levels across the document.
+
+    Body = the size with the most *characters*; larger sizes become headings
+    ranked '#'/'##'/'###' by descending size, document-wide for consistency.
+    """
+    weights: Counter = Counter()
+    for lines in pages_lines:
+        for line in lines:
+            weights[round(line["size"])] += sum(len(s["text"]) for s in line["spans"])
+    if not weights:
+        return {}
+    body_size = weights.most_common(1)[0][0]
+    heading_sizes = sorted((s for s in weights if s > body_size), reverse=True)
+    return {size: min(i + 1, 6) for i, size in enumerate(heading_sizes)}
+
+
+def _md_page_blocks(
+    lines: list[dict], page: dict, level_of: dict[int, int]
+) -> list[tuple[float, str]]:
+    """Best-effort Markdown blocks for one page, each tagged with its y-position."""
+    blocks: list[tuple[float, str]] = []
+    for line in lines:
+        size = round(line["size"])
+        if size in level_of:
+            text = " ".join(s["text"] for s in line["spans"]).strip()
+            rendered = f"{'#' * level_of[size]} {text}"
+        else:
+            rendered = " ".join(_emphasise(s) for s in line["spans"]).strip()
+        if rendered:
+            blocks.append((line["y"], rendered))
+
+    for img in page.get("images", []):
+        blocks.append((img["bbox"]["y"], f"![]({img['file']})"))
+
+    blocks.sort(key=lambda b: b[0])
+    return blocks
+
+
+def to_markdown(result: dict, path: str | Path | None = None) -> str:
+    """Render *result* as best-effort Markdown for RAG; write it if *path* given.
+
+    Headings are inferred from font sizes, emphasis from weight/name, images
+    inlined as ``![](file)``. Retrieval quality, not visual fidelity; see README.
+    """
+    pages_lines = [_group_lines(page.get("text_spans", [])) for page in result["pages"]]
+    level_of = _heading_levels(pages_lines)
+
+    rendered_pages = []
+    for lines, page in zip(pages_lines, result["pages"]):
+        blocks = _md_page_blocks(lines, page, level_of)
+        text = "\n\n".join(block for _, block in blocks)
+        if text:
+            rendered_pages.append(text)
+
+    body = "\n\n".join(rendered_pages)
+    text = body + "\n" if body else ""
+    if path is not None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return text
+
+
+def convert(
     pdf_path: str | Path,
     output_dir: str | Path = "output",
     password: str | None = None,
@@ -523,119 +669,34 @@ def extract_pdf(
     space_gap: float = SPACE_GAP_RATIO,
     validate: bool = False,
 ) -> dict:
-    """
-    Extract all raw data from *pdf_path* and write the result to *output_dir*.
+    """Run the full pipeline: extract *pdf_path*, write json + md + images.
 
-    Pass *password* to open an encrypted/password-protected PDF.
-    *line_overlap* controls how much two spans must vertically overlap (as a
-    fraction of the shorter span's height) to be grouped on the same line.
-    *space_gap* controls the minimum horizontal gap (as a fraction of font size)
-    that triggers an inserted space between merged spans.
-    Set *validate* to check the result against ``output_schema.OUTPUT_SCHEMA``
-    before it is written (requires the optional ``jsonschema`` package).
-
-    Returns the full result dict (same object serialised as JSON).  Use
-    :func:`extract_data` instead if you want the dict without any disk writes.
-
-    Raises:
-        FileNotFoundError: if *pdf_path* does not exist.
-        EncryptedPDFError: if the PDF is encrypted and *password* is missing/wrong.
-        jsonschema.ValidationError: if *validate* is set and the result does not
-            conform to the schema.
+    Writes ``<stem>.{json,md}`` and ``<stem>_images/`` to *output_dir*; returns
+    the result dict. See the README for params/exceptions.
     """
     pdf_path = Path(pdf_path)
-    if not pdf_path.exists():
-        raise FileNotFoundError(pdf_path)
-
-    stem = pdf_path.stem
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    images_dir = out / f"{stem}_images"
-    images_dir.mkdir(parents=True, exist_ok=True)
-
-    result = extract_data(
+    result = extract(
         pdf_path,
         password=password,
-        images_dir=images_dir,
         line_overlap=line_overlap,
         space_gap=space_gap,
         validate=validate,
     )
 
-    # Persist JSON
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    stem = pdf_path.stem
     json_path = out / f"{stem}.json"
-    with open(json_path, "w", encoding="utf-8") as fh:
-        json.dump(result, fh, indent=2, ensure_ascii=False)
-
-    # Remove images dir if empty
-    if not any(images_dir.iterdir()):
-        images_dir.rmdir()
+    to_json(result, json_path)
+    to_markdown(result, out / f"{stem}.md")
+    to_images(result, out)
 
     logger.info("Wrote %s", json_path)
     return result
 
 
-# ── CLI ──────────────────────────────────────────────────────────────────────
+def validate_output(result: dict) -> None:
+    """Validate *result* against :data:`OUTPUT_SCHEMA`.
+    """
 
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Extract raw data from a PDF into JSON.")
-    ap.add_argument("pdf", help="Input PDF path")
-    ap.add_argument(
-        "-o", "--output", default="output", help="Output directory (default: ./output)"
-    )
-    ap.add_argument(
-        "-p", "--password", default=None, help="Password for an encrypted PDF"
-    )
-    ap.add_argument(
-        "--line-overlap",
-        type=float,
-        default=LINE_OVERLAP_RATIO,
-        metavar="RATIO",
-        help=f"Min vertical overlap fraction to group spans on the same line (default: {LINE_OVERLAP_RATIO})",
-    )
-    ap.add_argument(
-        "--space-gap",
-        type=float,
-        default=SPACE_GAP_RATIO,
-        metavar="RATIO",
-        help=f"Min gap/font-size ratio to insert a space between merged spans (default: {SPACE_GAP_RATIO})",
-    )
-    ap.add_argument(
-        "--validate",
-        action="store_true",
-        help="Validate the result against output_schema before writing "
-        "(requires the optional 'jsonschema' package)",
-    )
-    ap.add_argument("-v", "--verbose", action="store_true")
-    args = ap.parse_args()
-
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)s: %(message)s",
-    )
-
-    try:
-        result = extract_pdf(
-            args.pdf,
-            args.output,
-            password=args.password,
-            line_overlap=args.line_overlap,
-            space_gap=args.space_gap,
-            validate=args.validate,
-        )
-    except EncryptedPDFError as exc:
-        raise SystemExit(f"error: {exc}")
-
-    pages = len(result["pages"])
-    spans = sum(len(p["text_spans"]) for p in result["pages"])
-    imgs = sum(len(p["images"]) for p in result["pages"])
-    warnings = sum(1 for p in result["pages"] if "warning" in p)
-
-    print(f"✓ {pages} pages · {spans} spans · {imgs} images → {args.output}/")
-    if warnings:
-        print(f"{warnings} page(s) with no text layer (scanned?)")
-
-
-if __name__ == "__main__":
-    main()
+    validate_json(instance=result, schema=OUTPUT_SCHEMA)

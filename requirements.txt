@@ -2,3 +2,5 @@
 # helper API (PdfImage/PdfTextObj(obj.raw, ...), get_objects(filter=...)).
 pypdfium2>=5,<6
 Pillow>=9.0
+
+jsonschema>=4.0
