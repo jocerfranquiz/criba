@@ -8,8 +8,8 @@
 [![Pillow](https://img.shields.io/badge/Pillow-imaging-blue)](https://python-pillow.org/)
 [![License: GPL v3](https://img.shields.io/github/license/jocerfranquiz/criba)](LICENSE)
 
-Minimal, fully-local PDF extractor → JSON, Markdown, and images — for RAG, LLM agents, and pipelines.  
-Reads native-text PDFs via **pypdfium2** (Chrome's PDFium engine) and emits structured JSON (metadata, text spans, image refs), best-effort Markdown, and the embedded images — all in memory, with no cloud calls.
+Minimal, fully-local PDF extractor → JSON, Markdown, and images: for RAG, LLM agents, and pipelines.  
+Reads native-text PDFs via **pypdfium2** (Chrome's PDFium engine) and emits structured JSON (metadata, text spans, image refs), best-effort Markdown, and the embedded images. All in memory, with no cloud calls.
 
 ## Install
 
@@ -69,8 +69,8 @@ to_json(result, "out/document.json")       # structure for later md/html renderi
 to_images(result, "out")                   # write images under out/<stem>_images/
 ```
 
-`extract` returns a self-contained dict — image bytes ride along in each image
-entry's `data` field — so an agent/tool can consume it directly without touching
+`extract` returns a self-contained dict, and image bytes ride along in each image
+entry's `data` field, so an agent/tool can consume it directly without touching
 the filesystem. `to_markdown` and `to_json` **return** their text (and optionally
 write it when given a path); `to_images` writes the embedded bitmaps and returns
 the paths. `convert("document.pdf", output_dir="output")` is the convenience
@@ -78,7 +78,7 @@ pipeline that runs `extract` and writes all three outputs at once.
 
 `to_markdown()` is **best-effort, RAG-oriented**: it infers headings from
 font-size clusters, bold/italic from font weight and name, and inlines image
-references. The goal is retrieval quality, not visual fidelity — faithful
+references. The goal is retrieval quality, not visual fidelity. Faithful
 Markdown/HTML rendering is a separate concern built on top of the JSON.
 
 ### API reference
