@@ -108,13 +108,13 @@ Embedded image objects are extracted natively (JPEG/JP2 pass-through when possib
 
 ## Known Limitations
 
-| Limitation | Detail |
-|---|---|
-| **Reading order** | Spans are grouped into lines by vertical overlap (so baseline-aligned text of mixed font sizes reads left→right correctly), then ordered top→bottom. Multi-column layouts may still interleave, and super/subscripts may split into their own line. `raw_text` uses PDFium's heuristic reading order, which is better for complex layouts but not perfect. |
-| **Font weight** | `weight` is only populated when the font descriptor includes it. Many standard fonts report 0; infer boldness from the font name if needed. |
-| **Scanned PDFs** | Pages with no text layer produce empty `text_spans` and `raw_text`, flagged with `"warning": "no_text_layer"`. OCR is out of scope. |
-| **Image edge cases** | Alpha masks (SMask), stripped images, and inline images may extract incorrectly or be skipped. A warning is logged. |
-| **Form fields** | Interactive form data is not extracted. |
+| Limitation           | Detail                                                                                                                                                                                                                                                                                                                                                     |
+|----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Reading order**    | Spans are grouped into lines by vertical overlap (so baseline-aligned text of mixed font sizes reads left→right correctly), then ordered top→bottom. Multi-column layouts may still interleave, and super/subscripts may split into their own line. `raw_text` uses PDFium's heuristic reading order, which is better for complex layouts but not perfect. |
+| **Font weight**      | `weight` is only populated when the font descriptor includes it. Many standard fonts report 0; infer boldness from the font name if needed.                                                                                                                                                                                                                |
+| **Scanned PDFs**     | Pages with no text layer produce empty `text_spans` and `raw_text`, flagged with `"warning": "no_text_layer"`. OCR is out of scope.                                                                                                                                                                                                                        |
+| **Image edge cases** | Alpha masks (SMask), stripped images, and inline images may extract incorrectly or be skipped. A warning is logged.                                                                                                                                                                                                                                        |
+| **Form fields**      | Interactive form data is not extracted.                                                                                                                                                                                                                                                                                                                    |
 
 ## Dependencies
 
