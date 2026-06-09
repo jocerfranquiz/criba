@@ -101,10 +101,10 @@ def _normalize_bbox(
 
 
 def _bbox_union(a: dict, b: dict) -> dict:
-    x0 = min(a["x"], b["x"])
-    y0 = min(a["y"], b["y"])
-    x1 = max(a["x"] + a["w"], b["x"] + b["w"])
-    y1 = max(a["y"] + a["h"], b["y"] + b["h"])
+    x0: float = min(a["x"], b["x"])
+    y0: float = min(a["y"], b["y"])
+    x1: float = max(a["x"] + a["w"], b["x"] + b["w"])
+    y1: float = max(a["y"] + a["h"], b["y"] + b["h"])
     return {
         "x": round(x0, 2),
         "y": round(y0, 2),
@@ -265,8 +265,8 @@ def _coalesce_lines(
         top = span["bbox"]["y"]
         bottom = top + span["bbox"]["h"]
         for line in lines:
-            overlap = min(bottom, line["bottom"]) - max(top, line["top"])
-            min_h = min(bottom - top, line["bottom"] - line["top"])
+            overlap: float = min(bottom, line["bottom"]) - max(top, line["top"])
+            min_h: float = min(bottom - top, line["bottom"] - line["top"])
             if min_h > 0 and overlap > line_overlap * min_h:
                 line["spans"].append(span)
                 line["top"] = min(line["top"], top)
