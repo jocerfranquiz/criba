@@ -42,6 +42,8 @@ from pypdfium2.raw import (
     FPDFPageObj_GetFillColor,
 )
 
+from output_schema import validate_output
+
 logger = logging.getLogger(__name__)
 
 
@@ -259,7 +261,7 @@ def _coalesce_lines(
 
     # Build lines greedily: a span joins the first existing line whose vertical
     # band it mostly overlaps; otherwise it starts a new line.
-    raw_spans.sort(key=lambda s: s["bbox"]["y"])
+    raw_spans.sort(key=lambda _: _["bbox"]["y"])
     lines: list[dict] = []
     for span in raw_spans:
         top = span["bbox"]["y"]
@@ -382,6 +384,7 @@ def extract_pdf(
     password: str | None = None,
     line_overlap: float = LINE_OVERLAP_RATIO,
     space_gap: float = SPACE_GAP_RATIO,
+    validate: bool = False,
 ) -> dict:
     """
     Extract all raw data from *pdf_path* and write the result to *output_dir*.
@@ -391,12 +394,16 @@ def extract_pdf(
     fraction of the shorter span's height) to be grouped on the same line.
     *space_gap* controls the minimum horizontal gap (as a fraction of font size)
     that triggers an inserted space between merged spans.
+    Set *validate* to check the result against ``output_schema.OUTPUT_SCHEMA``
+    before it is written (requires the optional ``jsonschema`` package).
 
     Returns the full result dict (same object serialised as JSON).
 
     Raises:
         FileNotFoundError: if *pdf_path* does not exist.
         EncryptedPDFError: if the PDF is encrypted and *password* is missing/wrong.
+        jsonschema.ValidationError: if *validate* is set and the result does not
+            conform to the schema.
     """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
@@ -458,6 +465,9 @@ def extract_pdf(
     finally:
         doc.close()
 
+    if validate:
+        validate_output(result)
+
     # Persist JSON
     json_path = out / f"{stem}.json"
     with open(json_path, "w", encoding="utf-8") as fh:
@@ -497,6 +507,12 @@ def main() -> None:
         metavar="RATIO",
         help=f"Min gap/font-size ratio to insert a space between merged spans (default: {SPACE_GAP_RATIO})",
     )
+    ap.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate the result against output_schema before writing "
+        "(requires the optional 'jsonschema' package)",
+    )
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -512,6 +528,7 @@ def main() -> None:
             password=args.password,
             line_overlap=args.line_overlap,
             space_gap=args.space_gap,
+            validate=args.validate,
         )
     except EncryptedPDFError as exc:
         raise SystemExit(f"error: {exc}")

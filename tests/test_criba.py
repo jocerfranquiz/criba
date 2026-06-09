@@ -15,6 +15,7 @@ from criba import (
     _strip_subset_prefix,
     extract_pdf,
 )
+from output_schema import OUTPUT_SCHEMA, validate_output
 
 
 def _span(text, x, y, w, h, size=12.0):
@@ -352,3 +353,79 @@ def test_extract_metadata_omits_version_when_none(caplog):
     assert meta["page_count"] == 1
     assert meta["tagged"] is False
     assert caplog.records == []
+
+
+# ── output_schema ─────────────────────────────────────────────────────────────
+
+jsonschema = pytest.importorskip("jsonschema")
+
+
+def _minimal_result():
+    """A schema-conformant result with one fully-populated page."""
+    return {
+        "source_file": "doc.pdf",
+        "metadata": {"page_count": 1},
+        "pages": [
+            {
+                "page_number": 1,
+                "width": 612.0,
+                "height": 792.0,
+                "raw_text": "hello\n",
+                "text_spans": [
+                    {
+                        "text": "hello",
+                        "bbox": {"x": 0.0, "y": 0.0, "w": 30.0, "h": 12.0},
+                        "font": {"name": "Arial", "size": 12.0, "weight": 400},
+                        "color": {"r": 0, "g": 0, "b": 0, "a": 255},
+                    }
+                ],
+                "images": [
+                    {
+                        "index": 1,
+                        "bbox": {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0},
+                        "size_px": {"width": 4, "height": 4},
+                        "file": "doc_images/page_001_fig_001.png",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def test_output_schema_is_itself_valid():
+    """OUTPUT_SCHEMA conforms to the JSON Schema meta-schema."""
+    jsonschema.Draft202012Validator.check_schema(OUTPUT_SCHEMA)
+
+
+def test_validate_output_accepts_conformant_result():
+    validate_output(_minimal_result())  # must not raise
+
+
+def test_validate_output_accepts_scanned_page_warning():
+    result = _minimal_result()
+    page = result["pages"][0]
+    page["text_spans"] = []
+    page["images"] = []
+    page["warning"] = "no_text_layer"
+    validate_output(result)  # must not raise
+
+
+def test_validate_output_rejects_unknown_top_level_key():
+    result = _minimal_result()
+    result["extra"] = "nope"
+    with pytest.raises(jsonschema.ValidationError):
+        validate_output(result)
+
+
+def test_validate_output_rejects_missing_page_count():
+    result = _minimal_result()
+    del result["metadata"]["page_count"]
+    with pytest.raises(jsonschema.ValidationError):
+        validate_output(result)
+
+
+def test_validate_output_rejects_bad_warning_enum():
+    result = _minimal_result()
+    result["pages"][0]["warning"] = "something_else"
+    with pytest.raises(jsonschema.ValidationError):
+        validate_output(result)
