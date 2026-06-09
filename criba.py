@@ -265,12 +265,14 @@ def _coalesce_lines(
         top = span["bbox"]["y"]
         bottom = top + span["bbox"]["h"]
         for line in lines:
-            overlap: float = min(bottom, line["bottom"]) - max(top, line["top"])
-            min_h: float = min(bottom - top, line["bottom"] - line["top"])
+            line_top: float = line["top"]
+            line_bottom: float = line["bottom"]
+            overlap: float = min(bottom, line_bottom) - max(top, line_top)
+            min_h: float = min(bottom - top, line_bottom - line_top)
             if min_h > 0 and overlap > line_overlap * min_h:
                 line["spans"].append(span)
-                line["top"] = min(line["top"], top)
-                line["bottom"] = max(line["bottom"], bottom)
+                line["top"] = min(line_top, top)
+                line["bottom"] = max(line_bottom, bottom)
                 break
         else:
             lines.append({"top": top, "bottom": bottom, "spans": [span]})
