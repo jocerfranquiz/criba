@@ -63,6 +63,19 @@ from schema import OUTPUT_SCHEMA
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "extract",
+    "convert",
+    "extract_text",
+    "to_json",
+    "to_markdown",
+    "to_images",
+    "validate_output",
+    "EncryptedPDFError",
+    "LINE_OVERLAP_RATIO",
+    "SPACE_GAP_RATIO",
+]
+
 
 class EncryptedPDFError(Exception):
     """Raised when a PDF is encrypted and no/incorrect password was supplied."""
@@ -403,10 +416,23 @@ def _extract_images(
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
 
-def _open_document(pdf_path: Path, password: str | None) -> PdfDocument:
-    """Open *pdf_path*, mapping a password failure to ``EncryptedPDFError``."""
+def _source_id(src: str | Path | bytes) -> tuple[str, str]:
+    """Return ``(source_name, stem)`` for a path or in-memory PDF bytes."""
+    if isinstance(src, (bytes, bytearray)):
+        return "document.pdf", "document"
+    path = Path(src)
+    return path.name, path.stem
+
+
+def _open_document(
+    src: str | Path | bytes, source_name: str, password: str | None
+) -> PdfDocument:
+    """Open a PDF from a path or bytes, mapping a password failure to
+    ``EncryptedPDFError``.
+    """
+    arg = bytes(src) if isinstance(src, (bytes, bytearray)) else str(src)
     try:
-        return PdfDocument(str(pdf_path), password=password)
+        return PdfDocument(arg, password=password)
     except PdfiumError as exc:
         if getattr(exc, "err_code", None) == FPDF_ERR_PASSWORD:
             hint = (
@@ -415,7 +441,7 @@ def _open_document(pdf_path: Path, password: str | None) -> PdfDocument:
                 else "encrypted; supply a password via the 'password' argument "
                 "(or --password on the CLI)"
             )
-            raise EncryptedPDFError(f"{pdf_path.name} is {hint}.") from exc
+            raise EncryptedPDFError(f"{source_name} is {hint}.") from exc
         raise
 
 
@@ -475,27 +501,28 @@ def _build_result(
 
 
 def extract(
-    pdf_path: str | Path,
+    src: str | Path | bytes,
     *,
     password: str | None = None,
     line_overlap: float = LINE_OVERLAP_RATIO,
     space_gap: float = SPACE_GAP_RATIO,
     validate: bool = False,
 ) -> dict:
-    """Extract *pdf_path* into a result dict, fully in memory (no disk writes).
+    """Extract a PDF (path or raw bytes) into a result dict, fully in memory.
 
-    Images are decoded to in-memory bytes, so the dict is self-contained for the
-    ``to_*`` serialisers or direct use. See the README for params and exceptions.
+    No disk writes; images are decoded to in-memory bytes, so the dict is
+    self-contained for the ``to_*`` serialisers. See the README for the params
+    and exceptions.
     """
-    pdf_path = Path(pdf_path)
-    if not pdf_path.exists():
-        raise FileNotFoundError(pdf_path)
+    name, stem = _source_id(src)
+    if not isinstance(src, (bytes, bytearray)):
+        src = Path(src)
+        if not src.exists():
+            raise FileNotFoundError(src)
 
-    doc = _open_document(pdf_path, password)
+    doc = _open_document(src, name, password)
     try:
-        result = _build_result(
-            doc, pdf_path.name, pdf_path.stem, line_overlap, space_gap
-        )
+        result = _build_result(doc, name, stem, line_overlap, space_gap)
     finally:
         doc.close()
 
@@ -662,21 +689,20 @@ def to_markdown(result: dict, path: str | Path | None = None) -> str:
 
 
 def convert(
-    pdf_path: str | Path,
+    src: str | Path | bytes,
     output_dir: str | Path = "output",
     password: str | None = None,
     line_overlap: float = LINE_OVERLAP_RATIO,
     space_gap: float = SPACE_GAP_RATIO,
     validate: bool = False,
 ) -> dict:
-    """Run the full pipeline: extract *pdf_path*, write json + md + images.
+    """Run the full pipeline: extract a PDF, write json + md + images.
 
     Writes ``<stem>.{json,md}`` and ``<stem>_images/`` to *output_dir*; returns
     the result dict. See the README for params/exceptions.
     """
-    pdf_path = Path(pdf_path)
     result = extract(
-        pdf_path,
+        src,
         password=password,
         line_overlap=line_overlap,
         space_gap=space_gap,
@@ -685,7 +711,7 @@ def convert(
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    stem = pdf_path.stem
+    stem = Path(result["source_file"]).stem
     json_path = out / f"{stem}.json"
     to_json(result, json_path)
     to_markdown(result, out / f"{stem}.md")
@@ -700,3 +726,23 @@ def validate_output(result: dict) -> None:
     """
 
     validate_json(instance=result, schema=OUTPUT_SCHEMA)
+
+
+# ── Convenience ──────────────────────────────────────────────────────────────
+
+
+def extract_text(
+    src: str | Path | bytes,
+    *,
+    password: str | None = None,
+    line_overlap: float = LINE_OVERLAP_RATIO,
+    space_gap: float = SPACE_GAP_RATIO,
+) -> str:
+    """PDF (path or bytes) → Markdown string, in one call.
+
+    Returns text only (no image bytes), so the output is JSON-safe and
+    context-friendly — the call to expose via :mod:`tool`. See the README.
+    """
+    return to_markdown(
+        extract(src, password=password, line_overlap=line_overlap, space_gap=space_gap)
+    )

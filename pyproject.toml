@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "criba"
+version = "0.1.0"
+description = "Minimal, fully-local PDF → JSON/Markdown extractor for RAG and agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "jocerfranquiz" }]
+keywords = ["pdf", "extraction", "markdown", "rag", "llm", "agent", "pypdfium2"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Topic :: Text Processing",
+]
+dependencies = [
+    "pypdfium2>=5,<6",
+    "Pillow>=9.0",
+    "jsonschema>=4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jocerfranquiz/criba"
+
+[project.scripts]
+criba = "cli:main"
+
+[tool.setuptools]
+# Flat single-module layout (criba.py, cli.py, schema.py, tool.py at the root).
+py-modules = ["criba", "cli", "schema", "tool"]

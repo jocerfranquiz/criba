@@ -588,3 +588,63 @@ def test_convert_writes_json_md_and_images(tmp_path):
     assert (tmp_path / "sample.json").is_file()
     assert (tmp_path / "sample.md").is_file()
     assert (tmp_path / "sample_images" / "page_001_fig_001.jpg").is_file()
+
+
+# ── agent tool / bytes input ──────────────────────────────────────────────────
+
+
+@pytestmark_fixture
+def test_extract_accepts_bytes():
+    """extract() reads a PDF from raw bytes (no filesystem path needed)."""
+    result = extract(SAMPLE_PDF.read_bytes())
+
+    assert result["source_file"] == "document.pdf"
+    assert len(result["pages"]) == 2
+
+
+@pytestmark_fixture
+def test_convert_from_bytes_uses_default_stem(tmp_path):
+    """convert() on bytes names its outputs after the default 'document' stem."""
+    convert(SAMPLE_PDF.read_bytes(), output_dir=tmp_path)
+
+    assert (tmp_path / "document.json").is_file()
+    assert (tmp_path / "document.md").is_file()
+
+
+@pytestmark_fixture
+def test_extract_text_returns_markdown_string():
+    """extract_text() returns a JSON-safe Markdown string (no image bytes)."""
+    text = criba.extract_text(SAMPLE_PDF)
+
+    assert isinstance(text, str)
+    assert "# Sample Document Title" in text
+
+
+@pytestmark_fixture
+def test_call_tool_dispatches_to_extract_text():
+    """tool.call_tool() runs the model's JSON arguments through extract_text."""
+    import tool
+
+    out = tool.call_tool({"path": str(SAMPLE_PDF)})
+
+    assert "## Second Page Heading" in out
+
+
+def test_tool_adapters_share_one_schema():
+    """The OpenAI and Anthropic adapters expose the same name and parameters."""
+    import tool
+
+    oai = tool.as_openai_tool()
+    ant = tool.as_anthropic_tool()
+
+    assert oai["type"] == "function"
+    assert oai["function"]["name"] == ant["name"] == tool.TOOL_NAME
+    assert oai["function"]["parameters"] is tool.TOOL_PARAMETERS
+    assert ant["input_schema"] is tool.TOOL_PARAMETERS
+
+
+def test_tool_parameters_is_valid_json_schema():
+    """TOOL_PARAMETERS is itself a valid JSON Schema."""
+    import tool
+
+    jsonschema.Draft202012Validator.check_schema(tool.TOOL_PARAMETERS)

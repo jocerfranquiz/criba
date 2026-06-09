@@ -6,20 +6,27 @@ Reads native-text PDFs via **pypdfium2** (Chrome's PDFium engine) and emits stru
 ## Install
 
 ```bash
+pip install .            # installs the library + the `criba` command
+```
+
+Or, to run from a clone without installing, just grab the runtime deps:
+
+```bash
 pip install -r requirements.txt
 ```
 
 For development (linting, tests, git hooks):
 
 ```bash
-pip install -r requirements.txt -r requirements-dev.txt
+pip install -e . -r requirements-dev.txt
 pre-commit install
 ```
 
 ## Usage
 
 ```bash
-python cli.py document.pdf [-o output_dir] [-p PASSWORD]
+criba document.pdf [-o output_dir] [-p PASSWORD]   # after `pip install .`
+python cli.py document.pdf [-o output_dir]         # or run from a clone
 ```
 
 Use `-p/--password` for encrypted PDFs. Without it, an encrypted document
@@ -68,9 +75,12 @@ Markdown/HTML rendering is a separate concern built on top of the JSON.
 
 ### API reference
 
+`src` is a PDF path **or raw `bytes`** (handy for agents holding a PDF in memory).
+
 ```python
-extract(pdf_path, *, password=None, line_overlap=0.5, space_gap=0.25, validate=False) -> dict
-convert(pdf_path, output_dir="output", password=None, line_overlap=0.5, space_gap=0.25, validate=False) -> dict
+extract(src, *, password=None, line_overlap=0.5, space_gap=0.25, validate=False) -> dict
+convert(src, output_dir="output", password=None, line_overlap=0.5, space_gap=0.25, validate=False) -> dict
+extract_text(src, *, password=None, line_overlap=0.5, space_gap=0.25) -> str  # PDF -> Markdown
 to_json(result, path=None) -> str            # returns JSON; writes if path given
 to_markdown(result, path=None) -> str        # returns Markdown; writes if path given
 to_images(result, base_dir) -> list[Path]    # writes image files; returns paths written
@@ -90,9 +100,34 @@ to_images(result, base_dir) -> list[Path]    # writes image files; returns paths
 
 | Exception | When |
 |---|---|
-| `FileNotFoundError` | `pdf_path` does not exist. |
+| `FileNotFoundError` | `src` is a path that does not exist. |
 | `EncryptedPDFError` | The PDF is encrypted and `password` is missing or wrong. |
 | `jsonschema.ValidationError` | `validate=True` and the result does not conform to the schema. |
+
+## Use as an agent / LLM tool
+
+`criba.extract_text(src)` is the one safe call for an agent: PDF in, Markdown
+string out — text only, so it never blows up context with image bytes and is
+always JSON-safe. The `tool` module exposes a **framework-neutral** tool
+definition plus adapters for the two common function-calling shapes, so it works
+regardless of provider (the core library stays free of integration glue).
+
+```python
+import tool
+
+tool.TOOL_NAME            # "criba_extract_text"
+tool.TOOL_DESCRIPTION     # human/LLM-readable description
+tool.TOOL_PARAMETERS      # a standard JSON Schema for the arguments
+
+tool.as_openai_tool()     # -> {"type": "function", "function": {...}}
+tool.as_anthropic_tool()  # -> {"name", "description", "input_schema"}
+
+# When the model emits a tool call, hand its JSON arguments straight to:
+result_text = tool.call_tool({"path": "document.pdf"})   # -> Markdown string
+```
+
+Any other framework can build from the neutral `TOOL_NAME` / `TOOL_DESCRIPTION`
+/ `TOOL_PARAMETERS` primitives directly — `TOOL_PARAMETERS` is plain JSON Schema.
 
 ## JSON Schema
 
